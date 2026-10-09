@@ -39,7 +39,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.2.0"
+APP_VERSION = "v1.3.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -174,20 +174,42 @@ def extract_class(ws):
 
 # ---------- 表扬信：按月份段分组 ----------
 def find_month_group(ws, col):
+    total_cols = ws.max_column or 1
     cands = []
     for rng in ws.merged_cells.ranges:
         if rng.min_col <= col <= rng.max_col and rng.min_row <= HEADER_SCAN_ROWS:
             v = ws.cell(rng.min_row, rng.min_col).value
             if v:
-                cands.append(str(v).strip())
+                t = str(v).strip()
+                # 排除横跨整表的大标题
+                if (rng.max_col - rng.min_col + 1) >= total_cols - 1:
+                    continue
+                cands.append(t)
+    # 优先：合并标题中含具体数字月份
     for t in cands:
         if re.search(r"\d+\s*月", t):
+            return t
+    # 其次：表头行内从该列向左找含“月”的标题（覆盖合并锚点/非合并子标题）
+    for r in range(1, HEADER_SCAN_ROWS + 1):
+        for cc in range(col, 0, -1):
+            v = ws.cell(r, cc).value
+            if not v:
+                continue
+            t = str(v).strip()
+            if "月" in t and "统计表" not in t and "鉴定" not in t and t != "表扬信":
+                return t
+    # 合并候选里含“月”但无数字（如 X-X月加分项）
+    for t in cands:
+        if "月" in t:
             return t
     return cands[0] if cands else None
 
 
 def month_of_group(text):
     m = re.search(r"(\d+\s*[-—~]\s*\d+\s*月)", text)
+    if m:
+        return m.group(1).replace(" ", "")
+    m = re.search(r"([XxX]\s*[-—~]\s*[XxX]\s*月)", text)
     if m:
         return m.group(1).replace(" ", "")
     m = re.search(r"(\d+\s*月)", text)
@@ -204,6 +226,20 @@ def group_praise_by_month(ws, praise_cols):
             order.append(month)
         groups[month].append(c)
     return [(m, groups[m]) for m in order]
+
+
+# 月份段跨学年的标准先后顺序
+MONTH_ORDER = ["9-10月", "10-11月", "11-12月", "12-1月", "1-2月",
+               "2-3月", "3-4月", "4-5月", "5-6月", "5-8月",
+               "6-7月", "7-8月"]
+
+
+def month_sort_key(m):
+    for i, k in enumerate(MONTH_ORDER):
+        if k in m:
+            return i
+    mm = re.search(r"(\d+)", m)
+    return 100 + (int(mm.group(1)) if mm else 0)
 
 
 # ---------- 标题信息 ----------
@@ -386,27 +422,45 @@ def analyze_excel_auto(path):
             raise ValueError("未识别到姓名列。")
         if not score_col:
             raise ValueError("未识别到德育分(总分)列。")
+        month_groups = group_praise_by_month(ws, praise_cols)
         students = extract_students(ws, name_col, score_col, praise_cols)
         if not students:
             raise ValueError("未识别到学生数据。")
         return {"sheet": sheet,
                 "title": extract_title(ws, sheet),
                 "class": extract_class(ws),
-                "students": students}
+                "students": students,
+                "month_groups": month_groups}
     finally:
         wb.close()
 
 
-def process_one_excel(path, template_path_, output_dir):
-    """自动分析并生成一个 Word，返回 (输出路径, 人数)。"""
+def process_one_excel(path, template_path_, output_dir, selected_months=None):
+    """自动分析并生成一个 Word，返回 (输出路径, 人数)。
+    selected_months：只统计这些月份段（集合）；None = 全部月份段。"""
     info = analyze_excel_auto(path)
     out = compute_output_path(path, output_dir)
     d = os.path.dirname(out)
     if d:
         os.makedirs(d, exist_ok=True)
-    fill_word(template_path_, out, info["students"],
+    students = info["students"]
+    if selected_months is not None:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        try:
+            ws = wb[info["sheet"]]
+            headers = scan_headers(ws)
+            name_col, score_col, praise_cols = detect_columns(headers)
+            groups = group_praise_by_month(ws, praise_cols)
+            sel_cols = []
+            for month, cols in groups:
+                if month in selected_months:
+                    sel_cols.extend(cols)
+            students = extract_students(ws, name_col, score_col, sel_cols)
+        finally:
+            wb.close()
+    fill_word(template_path_, out, students,
               info["title"], info["class"])
-    return out, len(info["students"])
+    return out, len(students)
 
 
 # ============================ 图形界面 ============================
@@ -454,6 +508,7 @@ class App(TkinterDnD.Tk):
         self.batch_info = {}         # tree item -> 分析结果 dict
         self.batch_path_set = set()  # 已加入文件去重
         self._analyze_queue = []
+        self.batch_month_vars = {}   # 月份段 -> IntVar（批量页复选框）
         self._gen_queue = []
         self._gen_results = {}
 
@@ -719,7 +774,7 @@ class App(TkinterDnD.Tk):
         """批量页内容紧凑，自动降低窗口高度；切回单文件页恢复。"""
         try:
             if self.nb.select() == str(self.batch_tab):
-                self.geometry("820x740")
+                self.geometry("820x800")
             else:
                 self.geometry("820x900")
         except Exception:
@@ -760,6 +815,15 @@ class App(TkinterDnD.Tk):
                   foreground="gray").grid(
             row=2, column=1, columnspan=3, sticky="w", padx=4)
         set_frame.columnconfigure(1, weight=1)
+
+        month_frame = ttk.LabelFrame(
+            outer, text="表扬信月份段（对所有文件生效，可多选）")
+        month_frame.pack(fill="x")
+        self.batch_praise_frame = ttk.Frame(month_frame)
+        self.batch_praise_frame.pack(anchor="w", padx=8, pady=4)
+        ttk.Label(self.batch_praise_frame,
+                  text="添加文件并分析后，这里会显示可选月份段",
+                  foreground="gray").grid(row=0, column=0, sticky="w")
 
         list_frame = ttk.LabelFrame(
             outer, text="文件列表（可直接把 Excel 文件或文件夹拖入窗口）")
@@ -866,7 +930,34 @@ class App(TkinterDnD.Tk):
         else:
             self._batch_refresh_status()
 
+    def _refresh_batch_month_checks(self):
+        """汇总所有已分析文件的月份段并集，生成复选框（保留旧勾选）。"""
+        months, seen = [], set()
+        for info in self.batch_info.values():
+            for month, _cols in info.get("month_groups", []):
+                if month not in seen:
+                    seen.add(month)
+                    months.append(month)
+        months.sort(key=month_sort_key)
+        old = self.batch_month_vars
+        for w in self.batch_praise_frame.winfo_children():
+            w.destroy()
+        self.batch_month_vars = {}
+        if not months:
+            ttk.Label(self.batch_praise_frame,
+                      text="添加文件并分析后，这里会显示可选月份段",
+                      foreground="gray").grid(row=0, column=0, sticky="w")
+            return
+        for i, month in enumerate(months):
+            was = old[month].get() if month in old else 1
+            var = tk.IntVar(value=was)
+            self.batch_month_vars[month] = var
+            ttk.Checkbutton(self.batch_praise_frame, text=month,
+                            variable=var).grid(
+                row=i // 5, column=i % 5, sticky="w", padx=8, pady=3)
+
     def _batch_refresh_status(self):
+        self._refresh_batch_month_checks()
         total = len(self.batch_items)
         ready = len(self.batch_info)
         if total == 0:
@@ -885,6 +976,9 @@ class App(TkinterDnD.Tk):
             messagebox.showwarning("提示", "列表中没有可处理的文件。")
             return
         self._gen_queue = ready_items
+        selected = {m for m, v in self.batch_month_vars.items() if v.get()}
+        all_months = set(self.batch_month_vars)
+        self._sel_months = None if selected == all_months else selected
         self._gen_results = {"ok": 0, "fail": 0, "errors": []}
         self.batch_bar["maximum"] = len(ready_items)
         self.batch_bar["value"] = 0
@@ -901,7 +995,8 @@ class App(TkinterDnD.Tk):
         cur = self.batch_tree.item(item, "values")
         try:
             out, n = process_one_excel(
-                path, self.template_path.get(), self.output_dir.get())
+                path, self.template_path.get(), self.output_dir.get(),
+                self._sel_months)
             self._gen_results["ok"] += 1
             self.batch_tree.item(
                 item,
