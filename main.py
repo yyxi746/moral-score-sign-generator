@@ -13,7 +13,9 @@ import re
 import sys
 import json
 import copy
+import threading
 import webbrowser
+import urllib.request
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -39,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.3.0"
+APP_VERSION = "v1.4.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -50,6 +52,13 @@ def app_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_path(name):
+    """打包后资源在临时解压目录，开发时在脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.join(getattr(sys, "_MEIPASS", app_dir()), name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
 
 
 def is_number_text(text):
@@ -301,6 +310,28 @@ def extract_students(ws, name_col, score_col, praise_cols):
     return students
 
 
+def validate_students(students):
+    """生成前校验。返回问题列表：
+    ("zero",) 没有学生；
+    ("empty", 行号, 姓名) 分数为空；
+    ("neg", 行号, 姓名, 分数) 分数为负；
+    ("badtext", 行号, 姓名, 分数) 分数不是数字。"""
+    problems = []
+    if not students:
+        return [("zero",)]
+    for i, s in enumerate(students):
+        score = s.get("score", "")
+        if score == "" or score is None:
+            problems.append(("empty", i, s.get("name", "")))
+        else:
+            try:
+                if float(str(score).strip()) < 0:
+                    problems.append(("neg", i, s.get("name", ""), score))
+            except (ValueError, TypeError):
+                problems.append(("badtext", i, s.get("name", ""), score))
+    return problems
+
+
 # ---------- 输出文件名 ----------
 def output_file_name(excel_path):
     stem = os.path.splitext(os.path.basename(excel_path))[0]
@@ -435,9 +466,11 @@ def analyze_excel_auto(path):
         wb.close()
 
 
-def process_one_excel(path, template_path_, output_dir, selected_months=None):
+def process_one_excel(path, template_path_, output_dir, selected_months=None,
+                      overrides=None):
     """自动分析并生成一个 Word，返回 (输出路径, 人数)。
-    selected_months：只统计这些月份段（集合）；None = 全部月份段。"""
+    selected_months：只统计这些月份段（集合）；None = 全部月份段。
+    overrides：手工修正的标题/班级。"""
     info = analyze_excel_auto(path)
     out = compute_output_path(path, output_dir)
     d = os.path.dirname(out)
@@ -458,8 +491,12 @@ def process_one_excel(path, template_path_, output_dir, selected_months=None):
             students = extract_students(ws, name_col, score_col, sel_cols)
         finally:
             wb.close()
-    fill_word(template_path_, out, students,
-              info["title"], info["class"])
+    title = info["title"]
+    cls = info["class"]
+    if overrides:
+        title = overrides.get("title", title)
+        cls = overrides.get("class", cls)
+    fill_word(template_path_, out, students, title, cls)
     return out, len(students)
 
 
@@ -481,6 +518,12 @@ class App(TkinterDnD.Tk):
         self.title("德育分签字表生成器")
         self.geometry("820x900")
         self.minsize(780, 700)
+        ico = resource_path("app.ico")
+        if os.path.exists(ico):
+            try:
+                self.iconbitmap(default=ico)
+            except Exception:
+                pass
 
         cfg = load_config()
 
@@ -509,10 +552,86 @@ class App(TkinterDnD.Tk):
         self.batch_path_set = set()  # 已加入文件去重
         self._analyze_queue = []
         self.batch_month_vars = {}   # 月份段 -> IntVar（批量页复选框）
+        self.batch_overrides = {}    # item -> {"title":..,"class":..}
         self._gen_queue = []
         self._gen_results = {}
 
         self._build_ui()
+
+        if not os.path.exists(init_tpl):
+            self.after(300, self._first_run_guide)
+        self.after(1500, self._check_update)
+
+    # ---------- 首次运行 / 模板引导 ----------
+    def _first_run_guide(self):
+        messagebox.showinfo(
+            "欢迎使用",
+            "欢迎使用德育分签字表生成器。\n\n"
+            "首次使用需要选择一个 Word 签字表模板（.docx），\n"
+            "下面请选择模板文件；选择后会自动记住。")
+        self._choose_template_dialog()
+
+    def _choose_template_dialog(self):
+        """弹出文件框选择模板，选中返回 True。"""
+        path = filedialog.askopenfilename(
+            title="选择 Word 签字表模板",
+            filetypes=[("Word 文件", "*.docx"), ("所有文件", "*.*")])
+        if path:
+            self.template_path.set(path)
+            self._save_cfg()
+            return True
+        return False
+
+    def _ensure_template(self):
+        """模板缺失时弹窗引导；True 表示模板就绪。"""
+        t = self.template_path.get()
+        if t and os.path.exists(t):
+            return True
+        ans = messagebox.askyesnocancel(
+            "需要 Word 模板",
+            "未找到 Word 签字表模板。\n\n"
+            "“是”立即选择模板文件；\n“否”稍后在界面中手动选择。")
+        if ans is None:
+            return False
+        if ans:
+            return self._choose_template_dialog()
+        return False
+
+    # ---------- 检查更新 ----------
+    @staticmethod
+    def _version_tuple(v):
+        nums = re.findall(r"\d+", v or "")
+        return tuple(int(x) for x in nums[:3]) + (0, 0, 0)
+
+    def _check_update(self):
+        """后台线程请求最新版本，失败静默，绝不打扰使用。"""
+        def work():
+            try:
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/"
+                    "yyxi746/moral-score-sign-generator/releases/latest",
+                    headers={"Accept": "application/vnd.github+json",
+                             "User-Agent": "moral-score-sign-generator"})
+                with urllib.request.urlopen(req, timeout=6) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                tag = data.get("tag_name", "")
+                url = data.get("html_url", "")
+                if tag and self._version_tuple(tag) > self._version_tuple(APP_VERSION):
+                    self.after(0, lambda: self._show_update(tag, url))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update(self, tag, url):
+        if getattr(self, "_update_shown", False):
+            return
+        self._update_shown = True
+        lbl = ttk.Label(
+            self._bottom,
+            text=f"发现新版本 {tag}，点击前往下载",
+            foreground="#1a6fe0", cursor="hand2")
+        lbl.pack(side="right", padx=10)
+        lbl.bind("<Button-1>", lambda e: webbrowser.open(url))
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
@@ -525,6 +644,7 @@ class App(TkinterDnD.Tk):
 
         bottom = ttk.Frame(self)
         bottom.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        self._bottom = bottom
         self._make_info_button(bottom).pack(side="left")
         self.status = ttk.Label(bottom, text="就绪", foreground="gray")
         self.status.pack(side="left", padx=10)
@@ -840,6 +960,8 @@ class App(TkinterDnD.Tk):
         self.batch_tree.column("status", width=260, anchor="w")
         self.batch_tree.tag_configure("error", foreground="#d23030")
         self.batch_tree.tag_configure("ok", foreground="#1a8f3c")
+        self.batch_tree.tag_configure("warn", background="#fff3cd",
+                                      foreground="#8a6d00")
         self.batch_tree.pack(side="left", fill="both", expand=True,
                              padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(list_frame, orient="vertical",
@@ -852,6 +974,7 @@ class App(TkinterDnD.Tk):
             lambda e: self.status.config(text="松开鼠标即可添加文件…"))
         self.batch_tree.dnd_bind(
             "<<DragLeave>>", lambda e: self._batch_refresh_status())
+        self.batch_tree.bind("<Double-1>", self._batch_edit_row)
 
         self.batch_gen_btn = ttk.Button(
             outer, text="开始批量生成", command=self.batch_generate)
@@ -872,10 +995,107 @@ class App(TkinterDnD.Tk):
         if d:
             self._batch_add_files(collect_excels(d))
 
+    def _batch_edit_row(self, event=None):
+        item = self.batch_tree.identify_row(event.y) if event else None
+        if not item or item not in self.batch_info:
+            return
+        info = self.batch_info[item]
+        path = self.batch_items[item]
+        ov = self.batch_overrides.get(item, {})
+        top = tk.Toplevel(self)
+        top.title("文件详情")
+        top.transient(self)
+        top.resizable(False, True)
+        frm = ttk.Frame(top, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=os.path.basename(path), foreground="gray").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="Word 标题：").grid(row=1, column=0, sticky="w", pady=4)
+        title_var = tk.StringVar(value=ov.get("title", info["title"]))
+        ttk.Entry(frm, textvariable=title_var, width=48).grid(
+            row=1, column=1, sticky="we", pady=4)
+        ttk.Label(frm, text="班级：").grid(row=2, column=0, sticky="w", pady=4)
+        class_var = tk.StringVar(value=ov.get("class", info["class"]))
+        ttk.Entry(frm, textvariable=class_var, width=48).grid(
+            row=2, column=1, sticky="we", pady=4)
+
+        students = info["students"]
+        detail = ttk.LabelFrame(
+            frm, text=f"学生明细（{len(students)}人，黄色行=分数异常）")
+        detail.grid(row=3, column=0, columnspan=2, sticky="nsew",
+                    pady=(8, 0))
+        dt = ttk.Treeview(detail, columns=("name", "score", "praise"),
+                          show="headings", height=9)
+        dt.heading("name", text="姓名")
+        dt.heading("score", text="德育分")
+        dt.heading("praise", text="表扬信(条)")
+        dt.column("name", width=240, anchor="w")
+        dt.column("score", width=100, anchor="center")
+        dt.column("praise", width=100, anchor="center")
+        dt.tag_configure("warnrow", background="#fff3cd")
+        bad_rows = {p[1] for p in info.get("problems", [])
+                    if p[0] in ("empty", "neg", "badtext")}
+        for i, s in enumerate(students):
+            dt.insert("", "end",
+                      values=(s["name"], s["score"], s["praise"]),
+                      tags=("warnrow",) if i in bad_rows else ())
+        dt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        dsb = ttk.Scrollbar(detail, orient="vertical", command=dt.yview)
+        dsb.pack(side="right", fill="y", pady=6)
+        dt.configure(yscrollcommand=dsb.set)
+
+        def status_text(suffix):
+            probs = info.get("problems", [])
+            if probs and probs[0][0] == "zero":
+                return f"异常：没有学生数据（{suffix}）"
+            if probs:
+                return f"就绪（{len(probs)}项异常·{suffix}）"
+            return f"就绪（{suffix}）"
+
+        def save():
+            t = title_var.get().strip()
+            if not t:
+                messagebox.showwarning("提示", "标题不能为空。", parent=top)
+                return
+            self.batch_overrides[item] = {"title": t,
+                                         "class": class_var.get().strip()}
+            cur = self.batch_tree.item(item, "values")
+            tags = self.batch_tree.item(item, "tags")
+            self.batch_tree.item(
+                item,
+                values=(cur[0], cur[1], cur[2], status_text("已修正")),
+                tags=tags)
+            top.destroy()
+
+        def reset():
+            self.batch_overrides.pop(item, None)
+            cur = self.batch_tree.item(item, "values")
+            tags = self.batch_tree.item(item, "tags")
+            probs = info.get("problems", [])
+            if probs and probs[0][0] == "zero":
+                status = "异常：没有学生数据"
+            elif probs:
+                status = f"就绪（{len(probs)}项异常，双击查看）"
+            else:
+                status = "就绪"
+            self.batch_tree.item(
+                item, values=(cur[0], cur[1], cur[2], status), tags=tags)
+            top.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(btns, text="保存修正", command=save).pack(side="left", padx=6)
+        ttk.Button(btns, text="恢复自动识别", command=reset).pack(side="left", padx=6)
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side="left", padx=6)
+        top.grab_set()
+        top.update_idletasks()
+        top.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 30}")
+
     def batch_remove(self):
         for sel in self.batch_tree.selection():
             path = self.batch_items.pop(sel, None)
             self.batch_info.pop(sel, None)
+            self.batch_overrides.pop(sel, None)
             if path:
                 self.batch_path_set.discard(path)
             self.batch_tree.delete(sel)
@@ -885,6 +1105,7 @@ class App(TkinterDnD.Tk):
         self.batch_items.clear()
         self.batch_info.clear()
         self.batch_path_set.clear()
+        self.batch_overrides.clear()
         self._analyze_queue.clear()
         for i in self.batch_tree.get_children():
             self.batch_tree.delete(i)
@@ -915,11 +1136,21 @@ class App(TkinterDnD.Tk):
         path = self.batch_items.get(item)
         try:
             info = analyze_excel_auto(path)
+            problems = validate_students(info["students"])
+            info["problems"] = problems
             self.batch_info[item] = info
+            if problems and problems[0][0] == "zero":
+                status, tags = "异常：没有学生数据", ("warn",)
+            elif problems:
+                status, tags = (f"就绪（{len(problems)}项异常，双击查看）",
+                                ("warn",))
+            else:
+                status, tags = "就绪", ()
             self.batch_tree.item(
                 item,
                 values=(os.path.basename(path), info["sheet"],
-                        len(info["students"]), "就绪"))
+                        len(info["students"]), status),
+                tags=tags)
         except Exception as ex:
             self.batch_tree.item(
                 item,
@@ -966,15 +1197,21 @@ class App(TkinterDnD.Tk):
             self.status.config(text=f"文件 {total} 个，可处理 {ready} 个")
 
     def batch_generate(self):
-        template = self.template_path.get()
-        if not template or not os.path.exists(template):
-            messagebox.showwarning(
-                "提示", "未找到 Word 模板，请先选择“签字表模板.docx”。")
+        if not self._ensure_template():
             return
         ready_items = [it for it in self.batch_items if it in self.batch_info]
         if not ready_items:
             messagebox.showwarning("提示", "列表中没有可处理的文件。")
             return
+        warn_items = [it for it in ready_items
+                      if self.batch_info[it].get("problems")]
+        if warn_items:
+            ans = messagebox.askyesno(
+                "数据异常提醒",
+                f"有 {len(warn_items)} 个文件存在空分数、负分、非数字分数或无学生等问题。\n\n"
+                "双击对应行可查看明细。\n是否仍要继续生成？")
+            if not ans:
+                return
         self._gen_queue = ready_items
         selected = {m for m, v in self.batch_month_vars.items() if v.get()}
         all_months = set(self.batch_month_vars)
@@ -996,7 +1233,7 @@ class App(TkinterDnD.Tk):
         try:
             out, n = process_one_excel(
                 path, self.template_path.get(), self.output_dir.get(),
-                self._sel_months)
+                self._sel_months, self.batch_overrides.get(item))
             self._gen_results["ok"] += 1
             self.batch_tree.item(
                 item,
@@ -1085,8 +1322,7 @@ class App(TkinterDnD.Tk):
             if not excel or not os.path.exists(excel):
                 messagebox.showwarning("提示", "请先选择有效的 Excel 文件。")
                 return
-            if not template or not os.path.exists(template):
-                messagebox.showwarning("提示", "未找到 Word 模板，请选择“签字表模板.docx”。")
+            if not self._ensure_template():
                 return
             name_col, score_col, _ = self._selected_cols()
             if not name_col:
@@ -1099,6 +1335,23 @@ class App(TkinterDnD.Tk):
             if not students:
                 messagebox.showwarning("提示", "没有识别到任何学生数据，请检查列映射。")
                 return
+            problems = validate_students(students)
+            if problems:
+                parts = []
+                for p in problems[:5]:
+                    if p[0] == "empty":
+                        parts.append(f"{p[2]} 分数为空")
+                    elif p[0] == "neg":
+                        parts.append(f"{p[2]} 分数为负({p[3]})")
+                    else:
+                        parts.append(f"{p[2]} 分数非数字({p[3]})")
+                more = "…" if len(problems) > 5 else ""
+                ans = messagebox.askyesno(
+                    "数据异常提醒",
+                    f"检测到 {len(problems)} 项异常：\n"
+                    + "；".join(parts) + more + "\n\n是否仍要生成？")
+                if not ans:
+                    return
             out_dir = os.path.dirname(output)
             if not output or not out_dir:
                 messagebox.showwarning("提示", "请指定输出文件路径。")
