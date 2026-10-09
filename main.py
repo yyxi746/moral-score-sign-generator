@@ -21,6 +21,8 @@ from openpyxl.utils import get_column_letter
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from tkinterdnd2 import TkinterDnD, DND_FILES
+
 from docx import Document
 from docx.shared import Pt
 from docx.oxml import OxmlElement
@@ -37,7 +39,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.2.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -217,7 +219,10 @@ def extract_title(ws, sheet_name):
     ym = re.search(r"(20\d{2}\s*[-—~]\s*20\d{2})", blob)
     tm = re.search(r"第\s*([1-4一二三四])\s*学期", blob)
     term = ("第" + CN_NUM[tm.group(1)] + "学期") if tm else ""
-    head = " ".join(p for p in [sheet_name or "",
+    sheet_part = sheet_name or ""
+    if "XX" in sheet_part:
+        sheet_part = ""
+    head = " ".join(p for p in [sheet_part,
                                 ym.group(1) if ym else "", term] if p)
     return head + "德育分确认签字表"
 
@@ -355,13 +360,73 @@ def fill_word(template_path, output_path_, students, title, class_name):
     doc.save(output_path_)
 
 
+# ============================ 批量处理 ============================
+def collect_excels(folder):
+    """递归收集文件夹下所有 xlsx/xlsm（排除 Excel 临时锁文件 ~$ 开头）。"""
+    out = []
+    for dirpath, _, files in os.walk(folder):
+        for f in files:
+            if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$"):
+                out.append(os.path.join(dirpath, f))
+    return sorted(out)
+
+
+def analyze_excel_auto(path):
+    """对单个文件自动识别（第一个工作表、全部月份组）。
+    返回 dict：sheet/title/class/students；识别失败抛异常。"""
+    wb = openpyxl.load_workbook(path, data_only=True)
+    try:
+        if not wb.sheetnames:
+            raise ValueError("工作簿中没有工作表。")
+        sheet = wb.sheetnames[0]
+        ws = wb[sheet]
+        headers = scan_headers(ws)
+        name_col, score_col, praise_cols = detect_columns(headers)
+        if not name_col:
+            raise ValueError("未识别到姓名列。")
+        if not score_col:
+            raise ValueError("未识别到德育分(总分)列。")
+        students = extract_students(ws, name_col, score_col, praise_cols)
+        if not students:
+            raise ValueError("未识别到学生数据。")
+        return {"sheet": sheet,
+                "title": extract_title(ws, sheet),
+                "class": extract_class(ws),
+                "students": students}
+    finally:
+        wb.close()
+
+
+def process_one_excel(path, template_path_, output_dir):
+    """自动分析并生成一个 Word，返回 (输出路径, 人数)。"""
+    info = analyze_excel_auto(path)
+    out = compute_output_path(path, output_dir)
+    d = os.path.dirname(out)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fill_word(template_path_, out, info["students"],
+              info["title"], info["class"])
+    return out, len(info["students"])
+
+
 # ============================ 图形界面 ============================
-class App(tk.Tk):
+def register_drop_recursive(widget, handler):
+    """递归为容器内所有控件注册文件拖放（不支持的控件自动跳过）。"""
+    try:
+        widget.drop_target_register(DND_FILES)
+        widget.dnd_bind("<<Drop>>", handler)
+    except Exception:
+        pass
+    for child in widget.winfo_children():
+        register_drop_recursive(child, handler)
+
+
+class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("德育分签字表生成器")
         self.geometry("820x900")
-        self.minsize(780, 840)
+        self.minsize(780, 700)
 
         cfg = load_config()
 
@@ -384,6 +449,14 @@ class App(tk.Tk):
         self.month_groups = []
         self.month_vars = {}
 
+        # 批量处理状态
+        self.batch_items = {}        # tree item -> 文件路径
+        self.batch_info = {}         # tree item -> 分析结果 dict
+        self.batch_path_set = set()  # 已加入文件去重
+        self._analyze_queue = []
+        self._gen_queue = []
+        self._gen_results = {}
+
         self._build_ui()
 
     def _build_ui(self):
@@ -395,8 +468,22 @@ class App(tk.Tk):
         menubar.add_cascade(label="帮助", menu=help_menu, underline=0)
         self.config(menu=menubar)
 
-        root = ttk.Frame(self)
-        root.pack(fill="both", expand=True, padx=10, pady=10)
+        bottom = ttk.Frame(self)
+        bottom.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        self._make_info_button(bottom).pack(side="left")
+        self.status = ttk.Label(bottom, text="就绪", foreground="gray")
+        self.status.pack(side="left", padx=10)
+
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        root = ttk.Frame(self.nb)
+        self.nb.add(root, text="单文件处理")
+        batch = ttk.Frame(self.nb)
+        self.nb.add(batch, text="批量处理")
+        self.batch_tab = batch
+        self._build_batch_tab(batch)
 
         r = 0
         ttk.Label(root, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
@@ -489,15 +576,12 @@ class App(tk.Tk):
         self.gen_btn = ttk.Button(root, text="生成签字表", command=self.generate)
         self.gen_btn.grid(row=r, column=0, columnspan=5, pady=10)
 
-        r += 1
-        bottom = ttk.Frame(root)
-        bottom.grid(row=r, column=0, columnspan=5, sticky="we", padx=10)
-        self._make_info_button(bottom).pack(side="left")
-        self.status = ttk.Label(bottom, text="就绪", foreground="gray")
-        self.status.pack(side="left", padx=10)
-
         root.columnconfigure(1, weight=1)
         root.rowconfigure(9, weight=1)
+
+        # 文件拖放支持
+        register_drop_recursive(root, self._on_drop_single)
+        register_drop_recursive(batch, self._on_drop_batch)
 
     # ---------- 文件选择 ----------
     def browse_excel(self):
@@ -629,6 +713,273 @@ class App(tk.Tk):
     def _save_cfg(self):
         save_config({"template_path": self.template_path.get(),
                      "output_dir": self.output_dir.get().strip()})
+
+    # ---------- 批量处理页 ----------
+    def _on_tab_changed(self, event=None):
+        """批量页内容紧凑，自动降低窗口高度；切回单文件页恢复。"""
+        try:
+            if self.nb.select() == str(self.batch_tab):
+                self.geometry("820x740")
+            else:
+                self.geometry("820x900")
+        except Exception:
+            pass
+
+    def _build_batch_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=8, pady=8)
+
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="添加文件",
+                   command=self.batch_browse_files).pack(side="left", padx=4)
+        ttk.Button(bar, text="添加文件夹",
+                   command=self.batch_browse_folder).pack(side="left", padx=4)
+        ttk.Button(bar, text="移除选中",
+                   command=self.batch_remove).pack(side="left", padx=4)
+        ttk.Button(bar, text="清空列表",
+                   command=self.batch_clear).pack(side="left", padx=4)
+
+        set_frame = ttk.Frame(outer)
+        set_frame.pack(fill="x")
+        ttk.Label(set_frame, text="Word 模板：").grid(
+            row=0, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(set_frame, textvariable=self.template_path).grid(
+            row=0, column=1, columnspan=3, sticky="we", padx=4)
+        ttk.Button(set_frame, text="浏览…",
+                   command=self.browse_template).grid(row=0, column=4, padx=4)
+        ttk.Label(set_frame, text="输出目录：").grid(
+            row=1, column=0, sticky="w", padx=4, pady=3)
+        ttk.Entry(set_frame, textvariable=self.output_dir).grid(
+            row=1, column=1, columnspan=2, sticky="we", padx=4)
+        ttk.Button(set_frame, text="浏览…",
+                   command=self.browse_output_dir).grid(row=1, column=3, padx=4)
+        ttk.Button(set_frame, text="清除",
+                   command=self.clear_output_dir).grid(row=1, column=4, padx=4)
+        ttk.Label(set_frame, text="（输出目录留空 = 每个文件与数据源同目录）",
+                  foreground="gray").grid(
+            row=2, column=1, columnspan=3, sticky="w", padx=4)
+        set_frame.columnconfigure(1, weight=1)
+
+        list_frame = ttk.LabelFrame(
+            outer, text="文件列表（可直接把 Excel 文件或文件夹拖入窗口）")
+        self.batch_tree = ttk.Treeview(
+            list_frame, columns=("file", "sheet", "count", "status"),
+            show="headings", height=8)
+        self.batch_tree.heading("file", text="文件名")
+        self.batch_tree.heading("sheet", text="工作表")
+        self.batch_tree.heading("count", text="人数")
+        self.batch_tree.heading("status", text="状态")
+        self.batch_tree.column("file", width=280, anchor="w")
+        self.batch_tree.column("sheet", width=140, anchor="center")
+        self.batch_tree.column("count", width=60, anchor="center")
+        self.batch_tree.column("status", width=260, anchor="w")
+        self.batch_tree.tag_configure("error", foreground="#d23030")
+        self.batch_tree.tag_configure("ok", foreground="#1a8f3c")
+        self.batch_tree.pack(side="left", fill="both", expand=True,
+                             padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self.batch_tree.yview)
+        sb.pack(side="right", fill="y", pady=6)
+        self.batch_tree.configure(yscrollcommand=sb.set)
+
+        self.batch_tree.dnd_bind(
+            "<<DragEnter>>",
+            lambda e: self.status.config(text="松开鼠标即可添加文件…"))
+        self.batch_tree.dnd_bind(
+            "<<DragLeave>>", lambda e: self._batch_refresh_status())
+
+        self.batch_gen_btn = ttk.Button(
+            outer, text="开始批量生成", command=self.batch_generate)
+        self.batch_gen_btn.pack(side="bottom", pady=4)
+        self.batch_bar = ttk.Progressbar(outer, mode="determinate")
+        self.batch_bar.pack(side="bottom", fill="x", pady=(6, 2))
+        list_frame.pack(side="top", fill="both", expand=True, pady=8)
+
+    def batch_browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="选择德育分统计表（可多选）",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
+        if paths:
+            self._batch_add_files(list(paths))
+
+    def batch_browse_folder(self):
+        d = filedialog.askdirectory(title="选择包含统计表的文件夹（自动递归）")
+        if d:
+            self._batch_add_files(collect_excels(d))
+
+    def batch_remove(self):
+        for sel in self.batch_tree.selection():
+            path = self.batch_items.pop(sel, None)
+            self.batch_info.pop(sel, None)
+            if path:
+                self.batch_path_set.discard(path)
+            self.batch_tree.delete(sel)
+        self._batch_refresh_status()
+
+    def batch_clear(self):
+        self.batch_items.clear()
+        self.batch_info.clear()
+        self.batch_path_set.clear()
+        self._analyze_queue.clear()
+        for i in self.batch_tree.get_children():
+            self.batch_tree.delete(i)
+        self._batch_refresh_status()
+
+    def _batch_add_files(self, files):
+        added = 0
+        for f in files:
+            f = os.path.normpath(f)
+            if f in self.batch_path_set:
+                continue
+            self.batch_path_set.add(f)
+            item = self.batch_tree.insert(
+                "", "end",
+                values=(os.path.basename(f), "-", "-", "等待分析…"))
+            self.batch_items[item] = f
+            self._analyze_queue.append(item)
+            added += 1
+        if added:
+            self.status.config(text=f"已添加 {added} 个文件，正在分析…")
+            self._pump_analyze()
+
+    def _pump_analyze(self):
+        if not self._analyze_queue:
+            self._batch_refresh_status()
+            return
+        item = self._analyze_queue.pop(0)
+        path = self.batch_items.get(item)
+        try:
+            info = analyze_excel_auto(path)
+            self.batch_info[item] = info
+            self.batch_tree.item(
+                item,
+                values=(os.path.basename(path), info["sheet"],
+                        len(info["students"]), "就绪"))
+        except Exception as ex:
+            self.batch_tree.item(
+                item,
+                values=(os.path.basename(path), "-", "-", f"失败：{ex}"),
+                tags=("error",))
+        if self._analyze_queue:
+            self.after(10, self._pump_analyze)
+        else:
+            self._batch_refresh_status()
+
+    def _batch_refresh_status(self):
+        total = len(self.batch_items)
+        ready = len(self.batch_info)
+        if total == 0:
+            self.status.config(text="就绪")
+        else:
+            self.status.config(text=f"文件 {total} 个，可处理 {ready} 个")
+
+    def batch_generate(self):
+        template = self.template_path.get()
+        if not template or not os.path.exists(template):
+            messagebox.showwarning(
+                "提示", "未找到 Word 模板，请先选择“签字表模板.docx”。")
+            return
+        ready_items = [it for it in self.batch_items if it in self.batch_info]
+        if not ready_items:
+            messagebox.showwarning("提示", "列表中没有可处理的文件。")
+            return
+        self._gen_queue = ready_items
+        self._gen_results = {"ok": 0, "fail": 0, "errors": []}
+        self.batch_bar["maximum"] = len(ready_items)
+        self.batch_bar["value"] = 0
+        self.batch_gen_btn.config(state="disabled")
+        self.status.config(text="开始批量生成…")
+        self._pump_generate()
+
+    def _pump_generate(self):
+        if not self._gen_queue:
+            self._batch_finish()
+            return
+        item = self._gen_queue.pop(0)
+        path = self.batch_items[item]
+        cur = self.batch_tree.item(item, "values")
+        try:
+            out, n = process_one_excel(
+                path, self.template_path.get(), self.output_dir.get())
+            self._gen_results["ok"] += 1
+            self.batch_tree.item(
+                item,
+                values=(cur[0], cur[1], cur[2], f"成功（{n}人）：{out}"),
+                tags=("ok",))
+        except Exception as ex:
+            self._gen_results["fail"] += 1
+            self._gen_results["errors"].append(
+                (os.path.basename(path), str(ex)))
+            self.batch_tree.item(
+                item,
+                values=(cur[0], cur[1], cur[2], f"失败：{ex}"),
+                tags=("error",))
+        self.batch_bar["value"] += 1
+        self.status.config(
+            text=f"已处理 {int(self.batch_bar['value'])}/{self.batch_bar['maximum']}")
+        self.after(10, self._pump_generate)
+
+    def _batch_finish(self):
+        self.batch_gen_btn.config(state="normal")
+        r = self._gen_results
+        self.status.config(
+            text=f"批量完成：成功 {r['ok']} 个，失败 {r['fail']} 个")
+        top = tk.Toplevel(self)
+        top.title("批量生成完成")
+        top.transient(self)
+        top.grab_set()
+        top.geometry(
+            f"440x280+{self.winfo_x()+200}+{self.winfo_y()+240}")
+        ttk.Label(top, text=f"成功 {r['ok']} 个，失败 {r['fail']} 个",
+                  font=("Microsoft YaHei UI", 13, "bold")).pack(
+            pady=(20, 8))
+        if r["errors"]:
+            msg = "\n".join(f"{n}：{e}" for n, e in r["errors"][:6])
+            ttk.Label(top, text=msg, foreground="#d23030",
+                      justify="left").pack(padx=20, pady=4)
+        btns = ttk.Frame(top)
+        btns.pack(pady=14)
+        out_dir = self.output_dir.get().strip()
+        if out_dir:
+            ttk.Button(
+                btns, text="打开输出目录",
+                command=lambda: (top.destroy(), os.startfile(out_dir))
+            ).grid(row=0, column=0, padx=8)
+        ttk.Button(btns, text="关闭", command=top.destroy).grid(
+            row=0, column=1, padx=8)
+
+    # ---------- 拖放 ----------
+    def _parse_drop_paths(self, data):
+        try:
+            items = list(self.tk.splitlist(data))
+        except Exception:
+            items = [data]
+        files = []
+        for it in items:
+            it = str(it).strip().strip("{}")
+            if not it:
+                continue
+            if os.path.isdir(it):
+                files.extend(collect_excels(it))
+            elif it.lower().endswith((".xlsx", ".xlsm")):
+                files.append(it)
+        return files
+
+    def _on_drop_single(self, event):
+        files = self._parse_drop_paths(event.data)
+        if not files:
+            return
+        if len(files) == 1:
+            self.excel_path.set(files[0])
+            self.load_excel()
+        else:
+            self.nb.select(self.batch_tab)
+            self._batch_add_files(files)
+
+    def _on_drop_batch(self, event):
+        files = self._parse_drop_paths(event.data)
+        self._batch_add_files(files)
 
     # ---------- 生成 ----------
     def generate(self):
