@@ -13,6 +13,7 @@ import re
 import sys
 import json
 import copy
+import webbrowser
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -36,6 +37,8 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
+APP_VERSION = "v1.1.0"
+GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
 
@@ -385,6 +388,13 @@ class App(tk.Tk):
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
+
+        menubar = tk.Menu(self)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="关于…", command=self.show_about)
+        menubar.add_cascade(label="帮助", menu=help_menu, underline=0)
+        self.config(menu=menubar)
+
         root = ttk.Frame(self)
         root.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -480,8 +490,11 @@ class App(tk.Tk):
         self.gen_btn.grid(row=r, column=0, columnspan=5, pady=10)
 
         r += 1
-        self.status = ttk.Label(root, text="就绪", foreground="gray")
-        self.status.grid(row=r, column=0, columnspan=5, sticky="w", padx=10)
+        bottom = ttk.Frame(root)
+        bottom.grid(row=r, column=0, columnspan=5, sticky="we", padx=10)
+        self._make_info_button(bottom).pack(side="left")
+        self.status = ttk.Label(bottom, text="就绪", foreground="gray")
+        self.status.pack(side="left", padx=10)
 
         root.columnconfigure(1, weight=1)
         root.rowconfigure(9, weight=1)
@@ -662,6 +675,63 @@ class App(tk.Tk):
                 self.gen_btn.config(state="normal")
             except Exception:
                 pass
+
+    # ---------- 关于 ----------
+    def _make_info_button(self, parent):
+        """左下角圆形 ⓘ 按钮，hover 变蓝，点击弹出"关于"窗口。"""
+        bg = ttk.Style().lookup("TFrame", "background") or "#f0f0f0"
+        size = 34
+        cx = size / 2
+        cv = tk.Canvas(parent, width=size, height=size, bg=bg,
+                       highlightthickness=0, bd=0, cursor="hand2")
+        ring = cv.create_oval(3, 3, size - 3, size - 3,
+                              outline="#9aa4b2", width=1.5)
+        dot = cv.create_oval(cx - 1.8, 9.5, cx + 1.8, 13.1,
+                             fill="#9aa4b2", outline="")
+        bar = cv.create_line(cx, 15.5, cx, 23.5, fill="#9aa4b2",
+                             width=1.8, capstyle="round")
+
+        def set_color(c):
+            cv.itemconfigure(ring, outline=c)
+            cv.itemconfigure(dot, fill=c)
+            cv.itemconfigure(bar, fill=c)
+
+        cv.bind("<Enter>", lambda e: set_color("#2b7fff"))
+        cv.bind("<Leave>", lambda e: set_color("#9aa4b2"))
+        cv.bind("<Button-1>", lambda e: self.show_about())
+        return cv
+
+    def show_about(self):
+        top = tk.Toplevel(self)
+        top.title("关于")
+        top.transient(self)
+        top.grab_set()
+        top.resizable(False, False)
+        top.geometry(f"450x330+{self.winfo_x()+180}+{self.winfo_y()+240}")
+
+        ttk.Label(top, text="德育分签字表生成器",
+                  font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(22, 4))
+        ttk.Label(top, text=f"版本 {APP_VERSION}").pack()
+        ttk.Label(top,
+                  text="根据 Excel 德育分统计表，自动生成 Word 德育分确认签字表。").pack(pady=(10, 2))
+        ttk.Label(top, text="Python · tkinter · openpyxl · python-docx",
+                  foreground="gray").pack()
+        link = ttk.Label(top, text=GITHUB_URL, foreground="#0066cc", cursor="hand2")
+        link.pack(pady=12)
+        link.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
+
+        btns = ttk.Frame(top)
+        btns.pack(pady=6)
+
+        def copy_link():
+            self.clipboard_clear()
+            self.clipboard_append(GITHUB_URL)
+            self.status.config(text="GitHub 链接已复制到剪贴板")
+
+        ttk.Button(btns, text="访问 GitHub",
+                   command=lambda: webbrowser.open(GITHUB_URL)).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=2, padx=6)
 
     def _ask_open(self, output, n):
         top = tk.Toplevel(self)
