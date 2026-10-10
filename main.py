@@ -41,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.5.0"
+APP_VERSION = "v1.6.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -348,6 +348,29 @@ def compute_output_path(excel_path, output_dir):
     return os.path.join(d, name)
 
 
+def unique_output_path(path, reserved):
+    """同一轮批量中若 path 已被别的源文件占用（同名不同源），自动加 _2/_3。"""
+    if path not in reserved:
+        return path
+    base, ext = os.path.splitext(path)
+    i = 2
+    while f"{base}_{i}{ext}" in reserved:
+        i += 1
+    return f"{base}_{i}{ext}"
+
+
+def ensure_writable(path):
+    """输出文件已存在且被占用（如正在 Word 中打开）时给出友好提示。"""
+    if os.path.exists(path):
+        try:
+            with open(path, "ab"):
+                pass
+        except PermissionError:
+            raise PermissionError(
+                "文件正在被使用（可能正在 Word 中打开），请关闭后重试："
+                + os.path.basename(path))
+
+
 # ============================ Word 填充 ============================
 def set_run_font(run, name="宋体", size=12, bold=False):
     run.font.name = name
@@ -401,6 +424,19 @@ def set_title_row(table, title, class_name):
                 replace_paragraph(p, title, size=18, bold=True)
 
 
+def set_repeat_header(table):
+    """让表头行（第 2 行）跨页时在每页顶部自动重复。"""
+    try:
+        if len(table.rows) >= 2:
+            trPr = table.rows[1]._tr.get_or_add_trPr()
+            if trPr.find(qn("w:tblHeader")) is None:
+                el = OxmlElement("w:tblHeader")
+                el.set(qn("w:val"), "true")
+                trPr.append(el)
+    except Exception:
+        pass
+
+
 def fill_word(template_path, output_path_, students, title, class_name):
     doc = Document(template_path)
     if not doc.tables:
@@ -424,6 +460,8 @@ def fill_word(template_path, output_path_, students, title, class_name):
             fill_cell(row.cells[ci], val, size=12)
 
     set_title_row(table, title, class_name)
+    set_repeat_header(table)
+    ensure_writable(output_path_)
     doc.save(output_path_)
 
 
@@ -467,12 +505,13 @@ def analyze_excel_auto(path):
 
 
 def process_one_excel(path, template_path_, output_dir, selected_months=None,
-                      overrides=None):
+                      overrides=None, out_path=None):
     """自动分析并生成一个 Word，返回 (输出路径, 人数)。
     selected_months：只统计这些月份段（集合）；None = 全部月份段。
-    overrides：手工修正的标题/班级。"""
+    overrides：手工修正的标题/班级。
+    out_path：显式指定输出路径（批量防同名覆盖时使用）。"""
     info = analyze_excel_auto(path)
-    out = compute_output_path(path, output_dir)
+    out = out_path or compute_output_path(path, output_dir)
     d = os.path.dirname(out)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -526,6 +565,7 @@ class App(TkinterDnD.Tk):
                 pass
 
         cfg = load_config()
+        self._skip_version = cfg.get("skip_version", "")
 
         self.excel_path = tk.StringVar()
         tpl = cfg.get("template_path", "")
@@ -555,6 +595,8 @@ class App(TkinterDnD.Tk):
         self.batch_overrides = {}    # item -> {"title":..,"class":..}
         self._gen_queue = []
         self._gen_results = {}
+        self._gen_cancel = False
+        self._gen_path_map = {}
 
         self._build_ui()
 
@@ -625,13 +667,25 @@ class App(TkinterDnD.Tk):
     def _show_update(self, tag, url):
         if getattr(self, "_update_shown", False):
             return
+        if tag == getattr(self, "_skip_version", ""):
+            return
         self._update_shown = True
-        lbl = ttk.Label(
-            self._bottom,
-            text=f"发现新版本 {tag}，点击前往下载",
-            foreground="#1a6fe0", cursor="hand2")
-        lbl.pack(side="right", padx=10)
+        wrap = ttk.Frame(self._bottom)
+        wrap.pack(side="right", padx=10)
+        lbl = ttk.Label(wrap, text=f"发现新版本 {tag}，点击前往下载",
+                        foreground="#1a6fe0", cursor="hand2")
+        lbl.pack(side="left")
         lbl.bind("<Button-1>", lambda e: webbrowser.open(url))
+        skip = ttk.Label(wrap, text="忽略此版本", foreground="gray",
+                         cursor="hand2")
+        skip.pack(side="left", padx=(8, 0))
+
+        def do_skip(_=None):
+            self._skip_version = tag
+            self._save_cfg()
+            wrap.destroy()
+
+        skip.bind("<Button-1>", do_skip)
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
@@ -900,7 +954,8 @@ class App(TkinterDnD.Tk):
 
     def _save_cfg(self):
         save_config({"template_path": self.template_path.get(),
-                     "output_dir": self.output_dir.get().strip()})
+                     "output_dir": self.output_dir.get().strip(),
+                     "skip_version": getattr(self, "_skip_version", "")})
 
     # ---------- 批量处理页 ----------
     def _on_tab_changed(self, event=None):
@@ -1226,17 +1281,36 @@ class App(TkinterDnD.Tk):
             if not ans:
                 return
         self._gen_queue = ready_items
+        # 规划输出路径：不同子目录下的同名 Excel 自动加后缀，避免互相覆盖
+        reserved = set()
+        self._gen_path_map = {}
+        for it in ready_items:
+            p = compute_output_path(self.batch_items[it],
+                                    self.output_dir.get())
+            final = unique_output_path(p, reserved)
+            reserved.add(final)
+            self._gen_path_map[it] = final
         selected = {m for m, v in self.batch_month_vars.items() if v.get()}
         all_months = set(self.batch_month_vars)
         self._sel_months = None if selected == all_months else selected
         self._gen_results = {"ok": 0, "fail": 0, "errors": []}
+        self._gen_cancel = False
         self.batch_bar["maximum"] = len(ready_items)
         self.batch_bar["value"] = 0
-        self.batch_gen_btn.config(state="disabled")
+        self.batch_gen_btn.config(text="取消生成",
+                                  command=self._cancel_generate,
+                                  state="normal")
         self.status.config(text="开始批量生成…")
         self._pump_generate()
 
+    def _cancel_generate(self):
+        self._gen_cancel = True
+        self.status.config(text="正在取消，完成当前文件后停止…")
+
     def _pump_generate(self):
+        if getattr(self, "_gen_cancel", False):
+            self._batch_finish(cancelled=True)
+            return
         if not self._gen_queue:
             self._batch_finish()
             return
@@ -1246,7 +1320,8 @@ class App(TkinterDnD.Tk):
         try:
             out, n = process_one_excel(
                 path, self.template_path.get(), self.output_dir.get(),
-                self._sel_months, self.batch_overrides.get(item))
+                self._sel_months, self.batch_overrides.get(item),
+                self._gen_path_map.get(item))
             self._gen_results["ok"] += 1
             self.batch_tree.item(
                 item,
@@ -1265,18 +1340,29 @@ class App(TkinterDnD.Tk):
             text=f"已处理 {int(self.batch_bar['value'])}/{self.batch_bar['maximum']}")
         self.after(10, self._pump_generate)
 
-    def _batch_finish(self):
-        self.batch_gen_btn.config(state="normal")
+    def _batch_finish(self, cancelled=False):
+        self.batch_gen_btn.config(text="开始批量生成",
+                                  command=self.batch_generate,
+                                  state="normal")
         r = self._gen_results
-        self.status.config(
-            text=f"批量完成：成功 {r['ok']} 个，失败 {r['fail']} 个")
+        if cancelled:
+            done = r["ok"] + r["fail"]
+            total = int(self.batch_bar["maximum"])
+            self.status.config(
+                text=f"已取消：完成 {done}/{total}，成功 {r['ok']} 个，"
+                     f"失败 {r['fail']} 个")
+        else:
+            self.status.config(
+                text=f"批量完成：成功 {r['ok']} 个，失败 {r['fail']} 个")
         top = tk.Toplevel(self)
-        top.title("批量生成完成")
+        top.title("批量生成已取消" if cancelled else "批量生成完成")
         top.transient(self)
         top.grab_set()
         top.geometry(
             f"440x280+{self.winfo_x()+200}+{self.winfo_y()+240}")
-        ttk.Label(top, text=f"成功 {r['ok']} 个，失败 {r['fail']} 个",
+        head = ("批量生成已取消，" if cancelled else "")
+        ttk.Label(top,
+                  text=f"{head}成功 {r['ok']} 个，失败 {r['fail']} 个",
                   font=("Microsoft YaHei UI", 13, "bold")).pack(
             pady=(20, 8))
         if r["errors"]:
@@ -1372,6 +1458,12 @@ class App(TkinterDnD.Tk):
             if not os.path.isdir(out_dir):
                 messagebox.showwarning("提示", f"输出目录不存在：\n{out_dir}")
                 return
+            if os.path.exists(output):
+                if not messagebox.askyesno(
+                        "文件已存在",
+                        f"输出文件已存在：\n{os.path.basename(output)}\n\n"
+                        "是否覆盖？"):
+                    return
 
             self.gen_btn.config(state="disabled")
             self.status.config(text="正在生成…")
