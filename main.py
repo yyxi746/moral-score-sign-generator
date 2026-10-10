@@ -41,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.4.0"
+APP_VERSION = "v1.5.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -728,16 +728,17 @@ class App(TkinterDnD.Tk):
         self.praise_frame.grid(row=1, column=1, columnspan=3, sticky="w", padx=6)
 
         r += 1
-        prev_frame = ttk.LabelFrame(root, text="数据预览")
+        prev_frame = ttk.LabelFrame(root, text="结果预览（生成前可核对，含全部学生）")
         prev_frame.grid(row=r, column=0, columnspan=5, sticky="nsew", padx=8, pady=6)
         self.tree = ttk.Treeview(prev_frame, columns=("name", "score", "praise"),
-                                 show="headings", height=8)
+                                 show="headings", height=10)
         self.tree.heading("name", text="姓名")
         self.tree.heading("score", text="德育分")
         self.tree.heading("praise", text="表扬信")
         self.tree.column("name", width=220, anchor="center")
         self.tree.column("score", width=170, anchor="center")
         self.tree.column("praise", width=170, anchor="center")
+        self.tree.tag_configure("warnrow", background="#fff3cd")
         self.tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(prev_frame, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y", pady=6)
@@ -878,10 +879,22 @@ class App(TkinterDnD.Tk):
             students = self.current_students()
             for item in self.tree.get_children():
                 self.tree.delete(item)
-            for st in students[:8]:
-                self.tree.insert("", "end",
-                                 values=(st["name"], st["score"], st["praise"]))
-            self.count_label.config(text=f"共识别到 {len(students)} 人")
+            problems = validate_students(students)
+            bad = {p[1] for p in problems
+                   if p[0] in ("empty", "neg", "badtext")}
+            for i, st in enumerate(students):
+                self.tree.insert(
+                    "", "end",
+                    values=(st["name"], st["score"], st["praise"]),
+                    tags=("warnrow",) if i in bad else ())
+            if problems and problems[0][0] == "zero":
+                self.count_label.config(text="共识别到 0 人")
+            elif problems:
+                self.count_label.config(
+                    text=f"共识别到 {len(students)} 人，"
+                         f"{len(problems)} 项分数异常（黄色行）")
+            else:
+                self.count_label.config(text=f"共识别到 {len(students)} 人")
         except Exception as ex:
             self._error(ex)
 
@@ -1432,6 +1445,14 @@ class App(TkinterDnD.Tk):
         ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=6)
         ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=2, padx=6)
 
+    def _safe_start(self, target, top=None):
+        try:
+            os.startfile(target)
+            if top is not None:
+                top.destroy()
+        except Exception as ex:
+            self._error(ex)
+
     def _ask_open(self, output, n):
         top = tk.Toplevel(self)
         top.title("生成成功")
@@ -1441,24 +1462,15 @@ class App(TkinterDnD.Tk):
         ttk.Label(top, text=f"已生成，共 {n} 人。").pack(pady=(24, 8))
         btns = ttk.Frame(top)
         btns.pack(pady=8)
-
-        def open_file():
-            top.destroy()
-            try:
-                os.startfile(output)
-            except Exception as ex:
-                self._error(ex)
-
-        def open_dir():
-            top.destroy()
-            try:
-                os.startfile(os.path.dirname(output))
-            except Exception as ex:
-                self._error(ex)
-
-        ttk.Button(btns, text="打开文件", command=open_file).grid(row=0, column=0, padx=8)
-        ttk.Button(btns, text="打开文件夹", command=open_dir).grid(row=0, column=1, padx=8)
-        ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=2, padx=8)
+        ttk.Button(btns, text="打开文件",
+                   command=lambda: self._safe_start(output, top)).grid(
+            row=0, column=0, padx=8)
+        ttk.Button(btns, text="打开文件夹",
+                   command=lambda: self._safe_start(
+                       os.path.dirname(output), top)).grid(
+            row=0, column=1, padx=8)
+        ttk.Button(btns, text="关闭", command=top.destroy).grid(
+            row=0, column=2, padx=8)
 
     def _error(self, ex):
         try:
