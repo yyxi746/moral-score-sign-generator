@@ -41,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.8.0"
+APP_VERSION = "v1.9.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -563,10 +563,18 @@ def strip_paren_note(text):
 
 
 def strip_score(text):
-    """去掉条目末尾的加分分值，
-    如「证书+1」→「证书」、「表扬信+0.5」→「表扬信」。
-    只删末尾的「+数字」，开头的日期数字（如 7.5、8.31）不受影响。"""
-    return re.sub(r"\s*[+＋]\s*\d+(?:\.\d+)?\s*$", "", str(text)).strip()
+    """去掉条目末尾连续的分值/次数标记，
+    如「证书+1」「表扬信+0.5」→ 去分值；「校级新闻*4」「校级新闻×4」→ 去次数；
+    「校级新闻*4 +4」→ 循环删除后得到「校级新闻」。
+    只删末尾的「+ / * / × / x + 数字」，开头的日期数字（如 7.5、8.31）不受影响。"""
+    s = str(text)
+    pat = r"\s*[+＋\*×xX]\s*\d+(?:\.\d+)?\s*$"
+    while True:
+        new = re.sub(pat, "", s)
+        if new == s:
+            break
+        s = new
+    return s.strip()
 
 
 def _split_cell_records(value):
@@ -723,6 +731,70 @@ def write_person_result_xlsx(rows, out_path):
     wb.close()
 
 
+# ============================ 句子形式转换 ============================
+# 证书前缀：获奖/名次类关键词
+_CERT_WIN_KEYS = ("奖", "竞赛", "比赛", "大赛", "冠军", "亚军", "季军")
+_CERT_RANK_RE = re.compile(r"第[一二三四五六七八九十百0-9]+名")
+# 证书前缀：荣誉称号类关键词
+_CERT_HONOR_KEYS = ("三好学生", "三号学生", "好学生", "号学生",
+                    "好室友", "好舍长", "标兵", "优秀", "先进",
+                    "最美", "百佳", "学霸", "示范", "之星", "积极分子",
+                    "称号", "荣誉", "星级", "好人")
+
+
+def cert_sentence_prefix(item):
+    """证书条目前缀：获奖/名次类→「荣获」；荣誉称号类→「被评为」；
+    无法判断默认「荣获」。含「奖/名次/竞赛/比赛」优先判为荣获。"""
+    if _CERT_RANK_RE.search(item) or any(k in item for k in _CERT_WIN_KEYS):
+        return "荣获"
+    if any(k in item for k in _CERT_HONOR_KEYS):
+        return "被评为"
+    return "荣获"
+
+
+def to_cert_sentence(item):
+    """证书条目转句子：去掉「证书」二字后按类型加「荣获/被评为」前缀。"""
+    t = str(item).strip().replace("证书", "").strip()
+    return cert_sentence_prefix(t) + t
+
+
+def to_praise_sentence(item):
+    """表扬信条目转句子：统一加「参与」前缀。"""
+    return "参与" + str(item).strip()
+
+
+def _sentence_lines(value, conv):
+    """单元格多行文本按换行拆分，逐条经 conv 转换；忽略空行。"""
+    if value is None:
+        return []
+    s = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return [conv(x) for x in s.split("\n") if x.strip()]
+
+
+def convert_result_to_sentences(in_path, out_path):
+    """读取第三页签生成的三列结果 Excel（姓名|证书|表扬信，含合计行），
+    把证书/表扬信条目转为完整句子，另存为新的三列 Excel。
+    返回数据行数（不含合计行）。"""
+    wb = openpyxl.load_workbook(in_path)
+    ws = wb.active
+    rows = []
+    data_count = 0
+    for r in range(2, ws.max_row + 1):
+        name = ws.cell(r, 1).value
+        if not name or not str(name).strip():
+            continue
+        name = str(name).strip()
+        is_total = name.endswith("（合计）")
+        if not is_total:
+            data_count += 1
+        certs = _sentence_lines(ws.cell(r, 2).value, to_cert_sentence)
+        praises = _sentence_lines(ws.cell(r, 3).value, to_praise_sentence)
+        rows.append((name, "\n".join(certs), "\n".join(praises), "", is_total))
+    wb.close()
+    write_person_result_xlsx(rows, out_path)
+    return data_count
+
+
 # ============================ 图形界面 ============================
 def register_drop_recursive(widget, handler):
     """递归为容器内所有控件注册文件拖放（不支持的控件自动跳过）。"""
@@ -786,6 +858,10 @@ class App(TkinterDnD.Tk):
         # 证书 / 表扬信提取状态
         self.ext_items = {}        # tree item -> 文件路径
         self.ext_path_set = set()  # 已加入文件去重
+
+        # 句子形式转换状态
+        self.sent_items = {}        # tree item -> 文件路径
+        self.sent_path_set = set()  # 已加入文件去重
 
         self._build_ui()
 
@@ -919,6 +995,11 @@ class App(TkinterDnD.Tk):
         self.extract_tab = extract
         self._build_extract_tab(extract)
 
+        sentence = ttk.Frame(self.nb)
+        self.nb.add(sentence, text="句子形式转换")
+        self.sentence_tab = sentence
+        self._build_sentence_tab(sentence)
+
         r = 0
         ttk.Label(root, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
         ttk.Entry(root, textvariable=self.excel_path).grid(
@@ -1019,6 +1100,7 @@ class App(TkinterDnD.Tk):
         register_drop_recursive(root, self._on_drop_single)
         register_drop_recursive(batch, self._on_drop_batch)
         register_drop_recursive(extract, self._on_drop_extract)
+        register_drop_recursive(sentence, self._on_drop_sentence)
 
     # ---------- 文件选择 ----------
     def browse_excel(self):
@@ -1206,6 +1288,8 @@ class App(TkinterDnD.Tk):
                 self.geometry("820x800")
             elif self.nb.select() == str(self.extract_tab):
                 self.geometry("820x720")
+            elif self.nb.select() == str(self.sentence_tab):
+                self.geometry("820x620")
             else:
                 self.geometry("820x900")
         except Exception:
@@ -1811,6 +1895,147 @@ class App(TkinterDnD.Tk):
         if missing:
             msg += "\n\n以下人员未在源表中找到：\n" + "、".join(missing)
         messagebox.showinfo("完成", msg)
+
+    # ---------- 句子形式转换页 ----------
+    def _build_sentence_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=8, pady=8)
+
+        tip = ttk.LabelFrame(outer, text="功能说明")
+        tip.pack(fill="x")
+        ttk.Label(
+            tip,
+            text="把「证书/表扬信提取」页生成的结果 Excel 转为完整句子：\n"
+                 "· 证书：竞赛/奖项/名次类前加「荣获」，荣誉称号类前加「被评为」，并去掉“证书”二字；\n"
+                 "· 表扬信：每条前加「参与」。\n"
+                 "顺序与原表一致，浅橙色「（合计）」行也会一并转换。",
+            justify="left").pack(anchor="w", padx=8, pady=6)
+
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x", pady=(8, 0))
+        ttk.Button(bar, text="添加文件",
+                   command=self.sent_browse_files).pack(side="left", padx=4)
+        ttk.Button(bar, text="添加文件夹",
+                   command=self.sent_browse_folder).pack(side="left", padx=4)
+        ttk.Button(bar, text="移除选中",
+                   command=self.sent_remove).pack(side="left", padx=4)
+        ttk.Button(bar, text="清空列表",
+                   command=self.sent_clear).pack(side="left", padx=4)
+
+        list_frame = ttk.LabelFrame(
+            outer, text="结果文件（第三页签生成的 Excel，可直接拖入文件或文件夹）")
+        list_frame.pack(fill="both", expand=True, pady=6)
+        self.sent_tree = ttk.Treeview(list_frame, columns=("file",),
+                                      show="headings", height=8)
+        self.sent_tree.heading("file", text="文件名")
+        self.sent_tree.column("file", width=680, anchor="w")
+        self.sent_tree.pack(side="left", fill="both", expand=True,
+                            padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self.sent_tree.yview)
+        sb.pack(side="right", fill="y", pady=6)
+        self.sent_tree.configure(yscrollcommand=sb.set)
+
+        out_frame = ttk.Frame(outer)
+        out_frame.pack(fill="x")
+        ttk.Label(out_frame, text="输出目录：").grid(
+            row=0, column=0, sticky="w", padx=4, pady=4)
+        self.sent_output = tk.StringVar()
+        ttk.Entry(out_frame, textvariable=self.sent_output).grid(
+            row=0, column=1, columnspan=2, sticky="we", padx=4)
+        ttk.Button(out_frame, text="浏览…",
+                   command=self.sent_browse_output).grid(row=0, column=3, padx=4)
+        ttk.Label(out_frame,
+                  text="（留空 = 各文件生成到自身所在目录，文件名自动加“_句式”）",
+                  foreground="gray").grid(
+            row=1, column=1, columnspan=2, sticky="w", padx=4)
+        out_frame.columnconfigure(1, weight=1)
+
+        ttk.Button(outer, text="开始转换并生成 Excel",
+                   command=self.sent_run).pack(pady=8)
+
+    def sent_browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="选择第三页签生成的结果 Excel（可多选）",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
+        if paths:
+            self._sent_add_files(list(paths))
+
+    def sent_browse_folder(self):
+        d = filedialog.askdirectory(title="选择包含结果 Excel 的文件夹（自动递归）")
+        if d:
+            self._sent_add_files(collect_excels(d))
+
+    def _sent_add_files(self, files):
+        added = 0
+        for f in files:
+            f = os.path.normpath(f)
+            if f in self.sent_path_set:
+                continue
+            self.sent_path_set.add(f)
+            item = self.sent_tree.insert("", "end", values=(os.path.basename(f),))
+            self.sent_items[item] = f
+            added += 1
+        if added:
+            self.status.config(text=f"已添加 {added} 个结果文件")
+
+    def sent_remove(self):
+        for sel in self.sent_tree.selection():
+            p = self.sent_items.pop(sel, None)
+            if p:
+                self.sent_path_set.discard(p)
+            self.sent_tree.delete(sel)
+
+    def sent_clear(self):
+        self.sent_items.clear()
+        self.sent_path_set.clear()
+        for i in self.sent_tree.get_children():
+            self.sent_tree.delete(i)
+
+    def _on_drop_sentence(self, event):
+        self._sent_add_files(self._parse_drop_paths(event.data))
+
+    def sent_browse_output(self):
+        first_dir = ""
+        if self.sent_items:
+            first_dir = os.path.dirname(next(iter(self.sent_items.values())))
+        d = filedialog.askdirectory(title="选择输出目录",
+                                    initialdir=first_dir or None)
+        if d:
+            self.sent_output.set(d)
+
+    def sent_run(self):
+        paths = list(self.sent_items.values())
+        if not paths:
+            messagebox.showwarning("提示", "请先添加一个或多个结果 Excel。")
+            return
+        out_dir = self.sent_output.get().strip()
+        ok, fail = 0, []
+        try:
+            for p in paths:
+                base = os.path.basename(p)
+                stem, ext = os.path.splitext(base)
+                target_dir = out_dir or os.path.dirname(p)
+                out = os.path.join(target_dir, f"{stem}_句式{ext or '.xlsx'}")
+                try:
+                    convert_result_to_sentences(p, out)
+                    ok += 1
+                except PermissionError:
+                    fail.append(f"{base}（输出文件被占用）")
+                except Exception:
+                    fail.append(base)
+        except Exception as ex:
+            self._error(ex)
+            return
+        if fail:
+            messagebox.showwarning(
+                "完成（有失败）",
+                f"成功转换 {ok} 个文件。\n\n以下文件转换失败：\n"
+                + "\n".join(fail)
+                + "\n\n请确认添加的是「证书/表扬信提取」生成的三列结果 Excel。")
+        else:
+            messagebox.showinfo(
+                "完成", f"已成功转换 {ok} 个文件（文件名加“_句式”）。")
 
     # ---------- 生成 ----------
     def generate(self):
