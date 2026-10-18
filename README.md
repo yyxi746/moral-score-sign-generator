@@ -6,12 +6,12 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 
 ## 下载
 
-进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载最新版 `default.exe`，双击即可使用，无需安装 Python。
+进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载最新版 `zixin-nxy.exe`，双击即可使用，无需安装 Python。
 
 ## ✨ 功能
 
 1. 图形界面，无需命令行操作；单文件 / 批量处理两个页签
-2. 自动识别姓名、德育总分、多组月份表扬信列，表扬信支持按月份段多选，无表扬信填 0
+2. 自动识别姓名、德育总分、多组月份表扬信列，姓名列 / 总分列识别后可在下拉框手动调整；表扬信支持按月份段多选，无表扬信填 0
 3. 批量处理：一次添加多个 Excel 或整个文件夹，支持把文件/文件夹直接拖入窗口，逐个分析生成、失败不中断、可中途取消；不同子文件夹下的同名文件自动加后缀区分、绝不互相覆盖
 4. 批量列表双击查看文件详情：学生明细（姓名 / 德育分 / 表扬信条数）一目了然，并可手工修正该文件的 Word 标题与班级
 5. 生成前结果预览：单文件页预览区显示全部学生（可滚动核对），分数异常行自动标黄；批量页双击任意文件即可在生成前核对标题、班级与完整学生明细
@@ -22,6 +22,8 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 10. 配置记忆：Word 模板路径、固定输出目录保存在系统 %APPDATA% 隐藏目录，程序目录不生成配置文件
 11. 输出文件名自动将数据源文件名里的「统计表」替换为「签字表」
 12. 自动生成 Word 标题，完整继承 Word 模板的表格样式、边框、字体，表头行跨页自动重复
+13. 单文件页选错数据源可一键「清除」复位，重新选择；文件 / 文件夹可直接拖入窗口
+14. 首次启动自动弹出「使用说明与反馈」，含数据复核提醒与反馈邮箱；关于窗提供「邮件反馈」按钮，可直接写信联系开发者
 
 ## 📦 环境依赖
 
@@ -35,5 +37,5 @@ python main.py
 ## 打包 exe
 
 ```bash
-pyinstaller --onefile --noconsole --name default --icon app.ico --add-data "app.ico;." --collect-all tkinterdnd2 main.py
+pyinstaller --onefile --noconsole --name zixin-nxy --icon app.ico --add-data "app.ico;." --collect-all tkinterdnd2 main.py
 ```

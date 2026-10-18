@@ -41,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.6.0"
+APP_VERSION = "v1.7.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -566,6 +566,7 @@ class App(TkinterDnD.Tk):
 
         cfg = load_config()
         self._skip_version = cfg.get("skip_version", "")
+        self._about_seen = bool(cfg.get("about_seen", False))
 
         self.excel_path = tk.StringVar()
         tpl = cfg.get("template_path", "")
@@ -602,9 +603,19 @@ class App(TkinterDnD.Tk):
 
         if not os.path.exists(init_tpl):
             self.after(300, self._first_run_guide)
+        elif not self._about_seen:
+            self.after(500, self._show_first_about)
         self.after(1500, self._check_update)
 
     # ---------- 首次运行 / 模板引导 ----------
+    def _show_first_about(self):
+        """首次启动时自动把关于窗弹到最前，只弹一次（之后靠用户手动打开）。"""
+        if getattr(self, "_about_seen", False):
+            return
+        self._about_seen = True
+        self._save_cfg()
+        self.show_about()
+
     def _first_run_guide(self):
         messagebox.showinfo(
             "欢迎使用",
@@ -612,6 +623,7 @@ class App(TkinterDnD.Tk):
             "首次使用需要选择一个 Word 签字表模板（.docx），\n"
             "下面请选择模板文件；选择后会自动记住。")
         self._choose_template_dialog()
+        self.after(100, self._show_first_about)
 
     def _choose_template_dialog(self):
         """弹出文件框选择模板，选中返回 True。"""
@@ -717,8 +729,9 @@ class App(TkinterDnD.Tk):
         r = 0
         ttk.Label(root, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
         ttk.Entry(root, textvariable=self.excel_path).grid(
-            row=r, column=1, columnspan=3, sticky="we", **pad)
-        ttk.Button(root, text="浏览…", command=self.browse_excel).grid(row=r, column=4, **pad)
+            row=r, column=1, columnspan=2, sticky="we", **pad)
+        ttk.Button(root, text="浏览…", command=self.browse_excel).grid(row=r, column=3, **pad)
+        ttk.Button(root, text="清除", command=self.clear_excel).grid(row=r, column=4, **pad)
 
         r += 1
         ttk.Label(root, text="工作表：").grid(row=r, column=0, sticky="w", **pad)
@@ -825,6 +838,36 @@ class App(TkinterDnD.Tk):
         except Exception as ex:
             self._error(ex)
 
+    def clear_excel(self):
+        """清除已选数据源，单文件页恢复到未选择状态。"""
+        if self.wb is not None:
+            try:
+                self.wb.close()
+            except Exception:
+                pass
+        self.wb = None
+        self.headers = {}
+        self.col_options = []
+        self.label_to_col = {}
+        self.excel_path.set("")
+        self.sheet_combo["values"] = []
+        self.sheet_name.set("")
+        self.name_combo["values"] = []
+        self.score_combo["values"] = []
+        self.name_label.set("")
+        self.score_label.set("")
+        self.month_groups = []
+        self.month_vars = {}
+        for w in self.praise_frame.winfo_children():
+            w.destroy()
+        self.title_text.set("")
+        self.class_name.set("")
+        self.output_path.set("")
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.count_label.config(text="共识别到 0 人")
+        self.status.config(text="已清除数据源")
+
     def browse_template(self):
         path = filedialog.askopenfilename(
             title="选择 Word 签字表模板",
@@ -881,6 +924,9 @@ class App(TkinterDnD.Tk):
         self.headers = scan_headers(ws)
         self.col_options = column_labels(self.headers)
         self.label_to_col = {label: c for label, c in self.col_options}
+        option_labels = [label for label, _ in self.col_options]
+        self.name_combo["values"] = option_labels
+        self.score_combo["values"] = option_labels
 
         name_col, score_col, praise_cols = detect_columns(self.headers)
         labels_by_col = {c: label for label, c in self.col_options}
@@ -955,7 +1001,8 @@ class App(TkinterDnD.Tk):
     def _save_cfg(self):
         save_config({"template_path": self.template_path.get(),
                      "output_dir": self.output_dir.get().strip(),
-                     "skip_version": getattr(self, "_skip_version", "")})
+                     "skip_version": getattr(self, "_skip_version", ""),
+                     "about_seen": bool(getattr(self, "_about_seen", False))})
 
     # ---------- 批量处理页 ----------
     def _on_tab_changed(self, event=None):
@@ -1510,18 +1557,34 @@ class App(TkinterDnD.Tk):
         top.title("关于")
         top.transient(self)
         top.grab_set()
-        top.resizable(False, False)
-        top.geometry(f"450x330+{self.winfo_x()+180}+{self.winfo_y()+240}")
+        top.lift()
+        top.focus_force()
+        top.resizable(True, True)
+        top.minsize(440, 440)
+        top.geometry(f"480x480+{self.winfo_x()+160}+{self.winfo_y()+140}")
 
         ttk.Label(top, text="德育分签字表生成器",
-                  font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(22, 4))
+                  font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(18, 4))
         ttk.Label(top, text=f"版本 {APP_VERSION}").pack()
         ttk.Label(top,
                   text="根据 Excel 德育分统计表，自动生成 Word 德育分确认签字表。").pack(pady=(10, 2))
+
+        about_text = (
+            "本工具专为农院资信管理员设计，旨在简化日常业务操作流程，"
+            "提升工作效率、减轻事务负担。由于程序存在偶发出错的可能性，"
+            "请各位资信管理员在使用工具导出、生成的结果时务必仔细核验，"
+            "做好复核工作。若在使用过程中遇到程序报错、数据异常或其他相关问题，"
+            "可联系25级王子瑶反馈，联系邮箱：yaowzxi@163.com。"
+        )
+        box = ttk.LabelFrame(top, text="使用说明与反馈", padding=12)
+        box.pack(fill="x", padx=18, pady=(10, 6))
+        ttk.Label(box, text=about_text, wraplength=408, justify="left",
+                  anchor="w").pack(fill="x")
+
         ttk.Label(top, text="Python · tkinter · openpyxl · python-docx",
                   foreground="gray").pack()
         link = ttk.Label(top, text=GITHUB_URL, foreground="#0066cc", cursor="hand2")
-        link.pack(pady=12)
+        link.pack(pady=10)
         link.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
 
         btns = ttk.Frame(top)
@@ -1532,10 +1595,15 @@ class App(TkinterDnD.Tk):
             self.clipboard_append(GITHUB_URL)
             self.status.config(text="GitHub 链接已复制到剪贴板")
 
+        def mail_feedback():
+            webbrowser.open(
+                "mailto:yaowzxi@163.com?subject=德育分签字表生成器问题反馈")
+
         ttk.Button(btns, text="访问 GitHub",
-                   command=lambda: webbrowser.open(GITHUB_URL)).grid(row=0, column=0, padx=6)
-        ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=6)
-        ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=2, padx=6)
+                   command=lambda: webbrowser.open(GITHUB_URL)).grid(row=0, column=0, padx=4)
+        ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=4)
+        ttk.Button(btns, text="邮件反馈", command=mail_feedback).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=3, padx=4)
 
     def _safe_start(self, target, top=None):
         try:
