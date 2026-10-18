@@ -41,7 +41,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.7.0"
+APP_VERSION = "v1.8.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -539,6 +539,190 @@ def process_one_excel(path, template_path_, output_dir, selected_months=None,
     return out, len(students)
 
 
+# ==================== 证书 / 表扬信提取（新模板） ====================
+def _expand_header_row(ws, row):
+    """把某一行因合并单元格而空置的单元格，用合并区左上角标题横向填充。"""
+    vals = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row, c).value
+        vals[c] = str(v).strip() if v is not None else ""
+    for mc in ws.merged_cells.ranges:
+        if mc.min_row <= row <= mc.max_row:
+            top = ws.cell(mc.min_row, mc.min_col).value
+            top = str(top).strip() if top is not None else ""
+            if top:
+                for c in range(mc.min_col, mc.max_col + 1):
+                    vals[c] = top
+    return vals
+
+
+def strip_paren_note(text):
+    """去掉中文/英文括号及其内容，
+    如「（25年6月迟发）校级学霸宿舍+2」→「校级学霸宿舍+2」。"""
+    return re.sub(r"[（(][^（）()]*[）)]", "", str(text)).strip()
+
+
+def strip_score(text):
+    """去掉条目末尾的加分分值，
+    如「证书+1」→「证书」、「表扬信+0.5」→「表扬信」。
+    只删末尾的「+数字」，开头的日期数字（如 7.5、8.31）不受影响。"""
+    return re.sub(r"\s*[+＋]\s*\d+(?:\.\d+)?\s*$", "", str(text)).strip()
+
+
+def _split_cell_records(value):
+    """单元格内多条记录按换行拆分，逐条去括号、去末尾分值、去空白。"""
+    if value is None:
+        return []
+    s = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    out = []
+    for line in s.split("\n"):
+        t = strip_score(strip_paren_note(line))
+        if t:
+            out.append(t)
+    return out
+
+
+def locate_cert_praise_cols(ws):
+    """识别新模板（第3行大类、第4行细分，数据从第5行）。
+    返回 (姓名列, [加分描述列...], [表扬信列...])；无法识别返回 (None, [], [])。"""
+    big = _expand_header_row(ws, 3)
+    name_col = None
+    for c in range(1, ws.max_column + 1):
+        if "姓名" in big.get(c, ""):
+            name_col = c
+            break
+    if name_col is None:
+        return None, [], []
+    seg_cols = {}
+    for c, v in big.items():
+        if "加分项" in v:
+            seg_cols.setdefault(v, []).append(c)
+    desc_cols, praise_cols = [], []
+    for cols in seg_cols.values():
+        for c in sorted(cols):
+            sub = ws.cell(4, c).value
+            sub = str(sub).strip() if sub is not None else ""
+            if "表扬信" in sub:
+                praise_cols.append(c)
+            elif "鉴定" in sub or not sub:
+                continue
+            else:
+                # 加分段第一列，第4行写的是月份（如 3-4月、5-8月），即加分描述列
+                desc_cols.append(c)
+    return name_col, desc_cols, praise_cols
+
+
+def extract_persons_from_workbook(path):
+    """读取一个工作簿内所有符合新模板的工作表，
+    返回 {姓名: (证书列表, 表扬信列表)}。不去重，完整保留跨月份条目。"""
+    wb = openpyxl.load_workbook(path, data_only=True)
+    result = {}
+    try:
+        for ws in wb.worksheets:
+            name_col, desc_cols, praise_cols = locate_cert_praise_cols(ws)
+            if name_col is None:
+                continue
+            for r in range(5, ws.max_row + 1):
+                nv = ws.cell(r, name_col).value
+                if nv is None or not str(nv).strip():
+                    continue
+                name = str(nv).strip()
+                certs, praises = [], []
+                for c in desc_cols:
+                    for rec in _split_cell_records(ws.cell(r, c).value):
+                        # 兜底：加分描述里若写了“表扬信”，归入表扬信
+                        (praises if "表扬信" in rec else certs).append(rec)
+                for c in praise_cols:
+                    for rec in _split_cell_records(ws.cell(r, c).value):
+                        praises.append(rec)
+                if name in result:
+                    result[name][0].extend(certs)
+                    result[name][1].extend(praises)
+                else:
+                    result[name] = (certs, praises)
+    finally:
+        wb.close()
+    return result
+
+
+def collect_person_rows(paths, wanted_names):
+    """按名单在多个源文件中提取。
+    rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
+    同名在多个文件出现时，每个文件各自一行，并在末尾追加一行「姓名（合计）」汇总。
+    返回 (rows, missing, multi_names)：
+      missing = 在所有源表中都找不到的姓名；
+      multi_names = 在多个源表中出现、已加合计行的姓名。"""
+    file_data = []
+    for p in paths:
+        try:
+            data = extract_persons_from_workbook(p)
+        except Exception:
+            data = {}
+        if data:
+            file_data.append((os.path.basename(p), data))
+    rows, missing, multi_names = [], [], []
+    for name in wanted_names:
+        hits = [(src, d[name]) for src, d in file_data if name in d]
+        if not hits:
+            missing.append(name)
+            continue
+        all_certs, all_praises = [], []
+        for src, (certs, praises) in hits:
+            rows.append((name, "\n".join(certs), "\n".join(praises), src, False))
+            all_certs.extend(certs)
+            all_praises.extend(praises)
+        if len(hits) > 1:
+            multi_names.append(name)
+            rows.append((f"{name}（合计）", "\n".join(all_certs),
+                         "\n".join(all_praises), "", True))
+    return rows, missing, multi_names
+
+
+def write_person_result_xlsx(rows, out_path):
+    """写出「姓名 | 证书 | 表扬信」三列结果，单元格内自动换行。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "提取结果"
+    ws.append(["姓名", "证书", "表扬信"])
+    for name, cert, praise, _src, _is_total in rows:
+        ws.append([name, cert, praise])
+
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    head_font = Font(bold=True)
+    head_fill = PatternFill("solid", fgColor="DDEBF7")
+    total_fill = PatternFill("solid", fgColor="FCE4D6")  # 合计行浅橙底
+    total_font = Font(bold=True)
+    head_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    wrap_top = Alignment(wrap_text=True, vertical="top")
+    name_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for i, w in enumerate([12, 60, 60], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    for c in range(1, 4):
+        cell = ws.cell(1, c)
+        cell.font = head_font
+        cell.fill = head_fill
+        cell.alignment = head_align
+        cell.border = border
+    for idx, (_name, _cert, _praise, _src, is_total) in enumerate(rows, start=2):
+        ws.cell(idx, 1).alignment = name_align
+        ws.cell(idx, 2).alignment = wrap_top
+        ws.cell(idx, 3).alignment = wrap_top
+        for c in range(1, 4):
+            cell = ws.cell(idx, c)
+            cell.border = border
+            if is_total:
+                cell.fill = total_fill
+                cell.font = total_font
+    ws.freeze_panes = "A2"
+    d = os.path.dirname(out_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    wb.save(out_path)
+    wb.close()
+
+
 # ============================ 图形界面 ============================
 def register_drop_recursive(widget, handler):
     """递归为容器内所有控件注册文件拖放（不支持的控件自动跳过）。"""
@@ -598,6 +782,10 @@ class App(TkinterDnD.Tk):
         self._gen_results = {}
         self._gen_cancel = False
         self._gen_path_map = {}
+
+        # 证书 / 表扬信提取状态
+        self.ext_items = {}        # tree item -> 文件路径
+        self.ext_path_set = set()  # 已加入文件去重
 
         self._build_ui()
 
@@ -726,6 +914,11 @@ class App(TkinterDnD.Tk):
         self.batch_tab = batch
         self._build_batch_tab(batch)
 
+        extract = ttk.Frame(self.nb)
+        self.nb.add(extract, text="证书/表扬信提取")
+        self.extract_tab = extract
+        self._build_extract_tab(extract)
+
         r = 0
         ttk.Label(root, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
         ttk.Entry(root, textvariable=self.excel_path).grid(
@@ -825,6 +1018,7 @@ class App(TkinterDnD.Tk):
         # 文件拖放支持
         register_drop_recursive(root, self._on_drop_single)
         register_drop_recursive(batch, self._on_drop_batch)
+        register_drop_recursive(extract, self._on_drop_extract)
 
     # ---------- 文件选择 ----------
     def browse_excel(self):
@@ -1010,6 +1204,8 @@ class App(TkinterDnD.Tk):
         try:
             if self.nb.select() == str(self.batch_tab):
                 self.geometry("820x800")
+            elif self.nb.select() == str(self.extract_tab):
+                self.geometry("820x720")
             else:
                 self.geometry("820x900")
         except Exception:
@@ -1458,6 +1654,163 @@ class App(TkinterDnD.Tk):
     def _on_drop_batch(self, event):
         files = self._parse_drop_paths(event.data)
         self._batch_add_files(files)
+
+    # ---------- 证书 / 表扬信提取页 ----------
+    def _build_extract_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=8, pady=8)
+
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="添加文件",
+                   command=self.ext_browse_files).pack(side="left", padx=4)
+        ttk.Button(bar, text="添加文件夹",
+                   command=self.ext_browse_folder).pack(side="left", padx=4)
+        ttk.Button(bar, text="移除选中",
+                   command=self.ext_remove).pack(side="left", padx=4)
+        ttk.Button(bar, text="清空列表",
+                   command=self.ext_clear).pack(side="left", padx=4)
+
+        list_frame = ttk.LabelFrame(
+            outer, text="源表（新模板德育分统计表，可直接把 Excel 文件或文件夹拖入）")
+        list_frame.pack(fill="both", expand=True, pady=6)
+        self.ext_tree = ttk.Treeview(list_frame, columns=("file",),
+                                     show="headings", height=7)
+        self.ext_tree.heading("file", text="文件名")
+        self.ext_tree.column("file", width=680, anchor="w")
+        self.ext_tree.pack(side="left", fill="both", expand=True,
+                           padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self.ext_tree.yview)
+        sb.pack(side="right", fill="y", pady=6)
+        self.ext_tree.configure(yscrollcommand=sb.set)
+
+        name_frame = ttk.LabelFrame(
+            outer, text="提取名单（必填，每行一个姓名；也可用逗号、顿号分隔）")
+        name_frame.pack(fill="x")
+        self.ext_name_text = tk.Text(name_frame, height=5)
+        self.ext_name_text.pack(fill="x", padx=6, pady=6)
+
+        out_frame = ttk.Frame(outer)
+        out_frame.pack(fill="x")
+        ttk.Label(out_frame, text="输出文件：").grid(
+            row=0, column=0, sticky="w", padx=4, pady=4)
+        self.ext_output = tk.StringVar()
+        ttk.Entry(out_frame, textvariable=self.ext_output).grid(
+            row=0, column=1, columnspan=2, sticky="we", padx=4)
+        ttk.Button(out_frame, text="浏览…",
+                   command=self.ext_browse_output).grid(row=0, column=3, padx=4)
+        ttk.Label(out_frame, text="（留空 = 生成到第一个源表所在目录）",
+                  foreground="gray").grid(
+            row=1, column=1, columnspan=2, sticky="w", padx=4)
+        out_frame.columnconfigure(1, weight=1)
+
+        ttk.Button(outer, text="开始提取并生成 Excel",
+                   command=self.ext_run).pack(pady=8)
+
+    def ext_browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="选择德育分统计表（可多选）",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
+        if paths:
+            self._ext_add_files(list(paths))
+
+    def ext_browse_folder(self):
+        d = filedialog.askdirectory(title="选择包含统计表的文件夹（自动递归）")
+        if d:
+            self._ext_add_files(collect_excels(d))
+
+    def _ext_add_files(self, files):
+        added = 0
+        for f in files:
+            f = os.path.normpath(f)
+            if f in self.ext_path_set:
+                continue
+            self.ext_path_set.add(f)
+            item = self.ext_tree.insert("", "end", values=(os.path.basename(f),))
+            self.ext_items[item] = f
+            added += 1
+        if added:
+            self.status.config(text=f"已添加 {added} 个源表")
+
+    def ext_remove(self):
+        for sel in self.ext_tree.selection():
+            p = self.ext_items.pop(sel, None)
+            if p:
+                self.ext_path_set.discard(p)
+            self.ext_tree.delete(sel)
+
+    def ext_clear(self):
+        self.ext_items.clear()
+        self.ext_path_set.clear()
+        for i in self.ext_tree.get_children():
+            self.ext_tree.delete(i)
+
+    def _on_drop_extract(self, event):
+        self._ext_add_files(self._parse_drop_paths(event.data))
+
+    def _parse_name_list(self):
+        raw = self.ext_name_text.get("1.0", "end")
+        out = []
+        for p in re.split(r"[\s,，、;；\n\r\t]+", raw):
+            p = p.strip()
+            if p and p not in out:
+                out.append(p)
+        return out
+
+    def ext_browse_output(self):
+        first_dir = ""
+        if self.ext_items:
+            first_dir = os.path.dirname(next(iter(self.ext_items.values())))
+        path = filedialog.asksaveasfilename(
+            title="保存提取结果",
+            defaultextension=".xlsx",
+            initialdir=first_dir or None,
+            initialfile="证书表扬信提取结果.xlsx",
+            filetypes=[("Excel 文件", "*.xlsx")])
+        if path:
+            self.ext_output.set(path)
+
+    def ext_run(self):
+        paths = list(self.ext_items.values())
+        if not paths:
+            messagebox.showwarning("提示", "请先添加一个或多个源表。")
+            return
+        names = self._parse_name_list()
+        if not names:
+            messagebox.showwarning("提示", "请填写提取名单（每行一个姓名）。")
+            return
+        out = self.ext_output.get().strip()
+        if not out:
+            out = os.path.join(os.path.dirname(paths[0]),
+                               "证书表扬信提取结果.xlsx")
+            self.ext_output.set(out)
+        try:
+            rows, missing, multi = collect_person_rows(paths, names)
+            if not rows:
+                messagebox.showwarning(
+                    "提示", "名单中的人员在所有源表中均未找到，请核对名单。")
+                return
+            write_person_result_xlsx(rows, out)
+        except PermissionError:
+            messagebox.showerror(
+                "写入失败",
+                f"输出文件可能正在被 Excel 打开，请关闭后重试：\n{out}")
+            return
+        except Exception as ex:
+            self._error(ex)
+            return
+        found = [n for n in names if n not in missing]
+        data_count = sum(1 for r in rows if not r[4])
+        msg = (f"已生成提取结果：\n{out}\n\n"
+               f"涉及 {len(found)} 人，共 {data_count} 条记录。")
+        if multi:
+            msg += ("\n\n以下人员在多个源表中出现，已分别成行，"
+                    "并在末尾追加浅橙色「（合计）」汇总行：\n"
+                    + "、".join(multi))
+        if missing:
+            msg += "\n\n以下人员未在源表中找到：\n" + "、".join(missing)
+        messagebox.showinfo("完成", msg)
 
     # ---------- 生成 ----------
     def generate(self):
