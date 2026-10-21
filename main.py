@@ -14,6 +14,8 @@ import sys
 import json
 import copy
 import threading
+import traceback
+import datetime
 import webbrowser
 import urllib.request
 
@@ -41,7 +43,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.9.0"
+APP_VERSION = "v1.10.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -465,6 +467,36 @@ def fill_word(template_path, output_path_, students, title, class_name):
     doc.save(output_path_)
 
 
+def check_template_structure(path):
+    """校验 Word 模板结构：存在、可打开、含表格、表格至少3行。返回 (ok, msg)。"""
+    if not path or not os.path.exists(path):
+        return False, "模板文件不存在。"
+    try:
+        doc = Document(path)
+    except Exception as ex:
+        return False, f"无法打开模板文件：{ex}"
+    if not doc.tables:
+        return False, "模板中没有找到表格，请检查 Word 模板。"
+    all_tr = doc.tables[0]._tbl.findall(qn("w:tr"))
+    if len(all_tr) < 3:
+        return False, "模板表格结构异常（至少需要标题行、表头行、一条数据行）。"
+    return True, "模板结构正常。"
+
+
+def log_error(exc):
+    """把异常 traceback 写入 %APPDATA%\\德育分签字表生成器\\error.log，带时间戳。"""
+    try:
+        d = app_config_dir()
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "error.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            f.write(f"版本: {APP_VERSION}\n")
+            f.write(traceback.format_exc())
+    except Exception:
+        pass
+
+
 # ============================ 批量处理 ============================
 def collect_excels(folder):
     """递归收集文件夹下所有 xlsx/xlsm（排除 Excel 临时锁文件 ~$ 开头）。"""
@@ -653,8 +685,32 @@ def extract_persons_from_workbook(path):
     return result
 
 
+def normalize_name(s):
+    """姓名归一化：去首尾空白、去括号及内容（如「（男）」「(25年6月迟发)」）、去所有空白，
+    用于模糊匹配；输出仍用原始姓名。"""
+    if not s:
+        return ""
+    s = str(s).strip()
+    s = re.sub(r"[（(].*?[)）]", "", s)
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def extract_semester(filename):
+    """从源表文件名提取学期标识，如「2025-2026学年第二学期」；提取不到则返回文件名主体。"""
+    if not filename:
+        return ""
+    m = re.search(r"(\d{4}[-–—]\d{4}学年第[一二三四五六123456]学期)", filename)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d{4}[-–—]\d{4}.*?学期)", filename)
+    if m:
+        return m.group(1)
+    return os.path.splitext(os.path.basename(filename))[0]
+
+
 def collect_person_rows(paths, wanted_names):
-    """按名单在多个源文件中提取。
+    """按名单在多个源文件中提取（姓名模糊匹配：自动去空格、去括号后缀）。
     rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
     同名在多个文件出现时，每个文件各自一行，并在末尾追加一行「姓名（合计）」汇总。
     返回 (rows, missing, multi_names)：
@@ -667,10 +723,16 @@ def collect_person_rows(paths, wanted_names):
         except Exception:
             data = {}
         if data:
-            file_data.append((os.path.basename(p), data))
+            norm_data = {}
+            for k, v in data.items():
+                nk = normalize_name(k)
+                if nk and nk not in norm_data:
+                    norm_data[nk] = v
+            file_data.append((os.path.basename(p), norm_data))
     rows, missing, multi_names = [], [], []
     for name in wanted_names:
-        hits = [(src, d[name]) for src, d in file_data if name in d]
+        nname = normalize_name(name)
+        hits = [(src, d[nname]) for src, d in file_data if nname in d]
         if not hits:
             missing.append(name)
             continue
@@ -687,13 +749,15 @@ def collect_person_rows(paths, wanted_names):
 
 
 def write_person_result_xlsx(rows, out_path):
-    """写出「姓名 | 证书 | 表扬信」三列结果，单元格内自动换行。"""
+    """写出「姓名 | 证书 | 表扬信 | 来源学期」四列结果，单元格内自动换行；
+    合计行的来源学期列留空。"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "提取结果"
-    ws.append(["姓名", "证书", "表扬信"])
-    for name, cert, praise, _src, _is_total in rows:
-        ws.append([name, cert, praise])
+    ws.append(["姓名", "证书", "表扬信", "来源学期"])
+    for name, cert, praise, src, _is_total in rows:
+        semester = "" if _is_total else extract_semester(src)
+        ws.append([name, cert, praise, semester])
 
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     head_font = Font(bold=True)
@@ -703,11 +767,12 @@ def write_person_result_xlsx(rows, out_path):
     head_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     wrap_top = Alignment(wrap_text=True, vertical="top")
     name_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
+    sem_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    for i, w in enumerate([12, 60, 60], start=1):
+    for i, w in enumerate([12, 60, 60, 22], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    for c in range(1, 4):
+    for c in range(1, 5):
         cell = ws.cell(1, c)
         cell.font = head_font
         cell.fill = head_fill
@@ -717,7 +782,8 @@ def write_person_result_xlsx(rows, out_path):
         ws.cell(idx, 1).alignment = name_align
         ws.cell(idx, 2).alignment = wrap_top
         ws.cell(idx, 3).alignment = wrap_top
-        for c in range(1, 4):
+        ws.cell(idx, 4).alignment = sem_align
+        for c in range(1, 5):
             cell = ws.cell(idx, c)
             cell.border = border
             if is_total:
@@ -812,7 +878,8 @@ class App(TkinterDnD.Tk):
         super().__init__()
         self.title("德育分签字表生成器")
         self.geometry("820x900")
-        self.minsize(780, 700)
+        self.minsize(720, 560)
+        self._visited_tabs = set()  # 已访问过的页签，避免切换时反复重置窗口尺寸
         ico = resource_path("app.ico")
         if os.path.exists(ico):
             try:
@@ -890,11 +957,17 @@ class App(TkinterDnD.Tk):
         self.after(100, self._show_first_about)
 
     def _choose_template_dialog(self):
-        """弹出文件框选择模板，选中返回 True。"""
+        """弹出文件框选择模板，选中且校验通过返回 True。"""
         path = filedialog.askopenfilename(
             title="选择 Word 签字表模板",
             filetypes=[("Word 文件", "*.docx"), ("所有文件", "*.*")])
         if path:
+            ok, msg = check_template_structure(path)
+            if not ok:
+                messagebox.showwarning(
+                    "模板校验失败",
+                    msg + "\n\n请重新选择正确的 Word 签字表模板。")
+                return False
             self.template_path.set(path)
             self._save_cfg()
             return True
@@ -1071,6 +1144,10 @@ class App(TkinterDnD.Tk):
         r += 1
         prev_frame = ttk.LabelFrame(root, text="结果预览（生成前可核对，含全部学生）")
         prev_frame.grid(row=r, column=0, columnspan=5, sticky="nsew", padx=8, pady=6)
+        prev_bar = ttk.Frame(prev_frame)
+        prev_bar.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Button(prev_bar, text="复制名单",
+                   command=self.copy_preview_names).pack(side="left")
         self.tree = ttk.Treeview(prev_frame, columns=("name", "score", "praise"),
                                  show="headings", height=10)
         self.tree.heading("name", text="姓名")
@@ -1149,6 +1226,12 @@ class App(TkinterDnD.Tk):
             title="选择 Word 签字表模板",
             filetypes=[("Word 文件", "*.docx"), ("所有文件", "*.*")])
         if path:
+            ok, msg = check_template_structure(path)
+            if not ok:
+                messagebox.showwarning(
+                    "模板校验失败",
+                    msg + "\n\n请重新选择正确的 Word 签字表模板。")
+                return
             self.template_path.set(path)
             self._save_cfg()
 
@@ -1250,6 +1333,17 @@ class App(TkinterDnD.Tk):
         name_col, score_col, praise_cols = self._selected_cols()
         return extract_students(ws, name_col, score_col, praise_cols)
 
+    def copy_preview_names(self):
+        """把预览区全部学生姓名复制到剪贴板。"""
+        names = [self.tree.item(i, "values")[0]
+                 for i in self.tree.get_children()]
+        if not names:
+            messagebox.showinfo("提示", "预览区暂无学生数据。")
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(names))
+        self.status.config(text=f"已复制 {len(names)} 个姓名到剪贴板")
+
     def refresh_preview(self):
         try:
             students = self.current_students()
@@ -1280,15 +1374,53 @@ class App(TkinterDnD.Tk):
                      "skip_version": getattr(self, "_skip_version", ""),
                      "about_seen": bool(getattr(self, "_about_seen", False))})
 
+    def _refresh_placeholder(self, tree, label):
+        """列表为空时显示灰色占位提示，有文件时隐藏文字。"""
+        label.config(text="" if tree.get_children()
+                      else "把 Excel 拖到这里，或点上方「添加文件」")
+
+    def _open_selected_folder(self, tree, items_dict):
+        for sel in tree.selection():
+            p = items_dict.get(sel)
+            if p and os.path.exists(p):
+                try:
+                    os.startfile(os.path.dirname(p))
+                except Exception as ex:
+                    self._error(ex)
+                return
+        messagebox.showinfo("提示", "请先选中一个文件。")
+
+    def _bind_list_context(self, tree, items_dict, remove_cmd, reanalyze_cmd=None):
+        """为文件列表绑定右键菜单：移除选中 / 打开所在文件夹 /（可选）重新分析。"""
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="移除选中", command=remove_cmd)
+        menu.add_command(label="打开所在文件夹",
+                         command=lambda: self._open_selected_folder(tree, items_dict))
+        if reanalyze_cmd:
+            menu.add_separator()
+            menu.add_command(label="重新分析", command=reanalyze_cmd)
+
+        def on_right(e):
+            item = tree.identify_row(e.y)
+            if item:
+                tree.selection_set(item)
+            menu.tk_popup(e.x_root, e.y_root)
+        tree.bind("<Button-3>", on_right)
+
     # ---------- 批量处理页 ----------
     def _on_tab_changed(self, event=None):
-        """批量页内容紧凑，自动降低窗口高度；切回单文件页恢复。"""
+        """首次进入某页签时给一个建议窗口尺寸；之后不再强制重置，
+        保留用户手动缩放后的大小。"""
         try:
-            if self.nb.select() == str(self.batch_tab):
+            cur = self.nb.select()
+            if cur in self._visited_tabs:
+                return
+            self._visited_tabs.add(cur)
+            if cur == str(self.batch_tab):
                 self.geometry("820x800")
-            elif self.nb.select() == str(self.extract_tab):
+            elif cur == str(self.extract_tab):
                 self.geometry("820x720")
-            elif self.nb.select() == str(self.sentence_tab):
+            elif cur == str(self.sentence_tab):
                 self.geometry("820x620")
             else:
                 self.geometry("820x900")
@@ -1342,6 +1474,10 @@ class App(TkinterDnD.Tk):
 
         list_frame = ttk.LabelFrame(
             outer, text="文件列表（可直接把 Excel 文件或文件夹拖入窗口）")
+        self.batch_placeholder = ttk.Label(
+            list_frame, text="把 Excel 拖到这里，或点上方「添加文件」",
+            foreground="gray")
+        self.batch_placeholder.pack(side="top", fill="x", padx=6, pady=(6, 0))
         self.batch_tree = ttk.Treeview(
             list_frame, columns=("file", "sheet", "count", "status"),
             show="headings", height=8)
@@ -1363,6 +1499,8 @@ class App(TkinterDnD.Tk):
                            command=self.batch_tree.yview)
         sb.pack(side="right", fill="y", pady=6)
         self.batch_tree.configure(yscrollcommand=sb.set)
+        self._bind_list_context(self.batch_tree, self.batch_items,
+                                 self.batch_remove, self.batch_reanalyze)
 
         self.batch_tree.dnd_bind(
             "<<DragEnter>>",
@@ -1373,7 +1511,7 @@ class App(TkinterDnD.Tk):
 
         self.batch_gen_btn = ttk.Button(
             outer, text="开始批量生成", command=self.batch_generate)
-        self.batch_gen_btn.pack(side="bottom", pady=4)
+        self.batch_gen_btn.pack(side="bottom", pady=10)
         self.batch_bar = ttk.Progressbar(outer, mode="determinate")
         self.batch_bar.pack(side="bottom", fill="x", pady=(6, 2))
         list_frame.pack(side="top", fill="both", expand=True, pady=8)
@@ -1495,6 +1633,7 @@ class App(TkinterDnD.Tk):
                 self.batch_path_set.discard(path)
             self.batch_tree.delete(sel)
         self._batch_refresh_status()
+        self._refresh_placeholder(self.batch_tree, self.batch_placeholder)
 
     def batch_clear(self):
         self.batch_items.clear()
@@ -1505,6 +1644,23 @@ class App(TkinterDnD.Tk):
         for i in self.batch_tree.get_children():
             self.batch_tree.delete(i)
         self._batch_refresh_status()
+        self._refresh_placeholder(self.batch_tree, self.batch_placeholder)
+
+    def batch_reanalyze(self):
+        """右键重新分析选中的文件。"""
+        selected = list(self.batch_tree.selection())
+        if not selected:
+            return
+        for sel in selected:
+            if sel in self.batch_items:
+                self.batch_info.pop(sel, None)
+                cur = self.batch_tree.item(sel, "values")
+                self.batch_tree.item(
+                    sel, values=(cur[0], "-", "-", "等待分析…"))
+                self._analyze_queue.append(sel)
+        if self._analyze_queue:
+            self.status.config(text=f"重新分析 {len(self._analyze_queue)} 个文件…")
+            self._pump_analyze()
 
     def _batch_add_files(self, files):
         added = 0
@@ -1519,6 +1675,7 @@ class App(TkinterDnD.Tk):
             self.batch_items[item] = f
             self._analyze_queue.append(item)
             added += 1
+        self._refresh_placeholder(self.batch_tree, self.batch_placeholder)
         if added:
             self.status.config(text=f"已添加 {added} 个文件，正在分析…")
             self._pump_analyze()
@@ -1621,6 +1778,7 @@ class App(TkinterDnD.Tk):
         all_months = set(self.batch_month_vars)
         self._sel_months = None if selected == all_months else selected
         self._gen_results = {"ok": 0, "fail": 0, "errors": []}
+        self._gen_detail = {}  # item -> {ok, out, error, count}
         self._gen_cancel = False
         self.batch_bar["maximum"] = len(ready_items)
         self.batch_bar["value"] = 0
@@ -1650,6 +1808,7 @@ class App(TkinterDnD.Tk):
                 self._sel_months, self.batch_overrides.get(item),
                 self._gen_path_map.get(item))
             self._gen_results["ok"] += 1
+            self._gen_detail[item] = {"ok": True, "out": out, "error": "", "count": n}
             self.batch_tree.item(
                 item,
                 values=(cur[0], cur[1], cur[2], f"成功（{n}人）：{out}"),
@@ -1658,6 +1817,7 @@ class App(TkinterDnD.Tk):
             self._gen_results["fail"] += 1
             self._gen_results["errors"].append(
                 (os.path.basename(path), str(ex)))
+            self._gen_detail[item] = {"ok": False, "out": "", "error": str(ex), "count": 0}
             self.batch_tree.item(
                 item,
                 values=(cur[0], cur[1], cur[2], f"失败：{ex}"),
@@ -1698,14 +1858,76 @@ class App(TkinterDnD.Tk):
                       justify="left").pack(padx=20, pady=4)
         btns = ttk.Frame(top)
         btns.pack(pady=14)
+        ttk.Button(btns, text="导出汇总报告",
+                   command=lambda: (top.destroy(), self._export_batch_summary())
+                   ).pack(side="left", padx=8)
         out_dir = self.output_dir.get().strip()
         if out_dir:
             ttk.Button(
                 btns, text="打开输出目录",
                 command=lambda: (top.destroy(), os.startfile(out_dir))
-            ).grid(row=0, column=0, padx=8)
-        ttk.Button(btns, text="关闭", command=top.destroy).grid(
-            row=0, column=1, padx=8)
+            ).pack(side="left", padx=8)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="left", padx=8)
+
+    def _export_batch_summary(self):
+        """把本次批量生成结果导出为 Excel 汇总报告（文件名/工作表/人数/状态/输出路径/失败原因）。"""
+        default_dir = self.output_dir.get().strip()
+        if not default_dir and self.batch_items:
+            default_dir = os.path.dirname(next(iter(self.batch_items.values())))
+        path = filedialog.asksaveasfilename(
+            title="保存批量汇总报告", defaultextension=".xlsx",
+            initialdir=default_dir or None,
+            initialfile="批量生成汇总.xlsx",
+            filetypes=[("Excel 文件", "*.xlsx")])
+        if not path:
+            return
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "汇总"
+            ws.append(["文件名", "工作表", "人数", "状态", "输出路径", "失败原因"])
+            for item, src in self.batch_items.items():
+                detail = getattr(self, "_gen_detail", {}).get(item, {})
+                info = self.batch_info.get(item, {})
+                sheet = info.get("sheet", "-")
+                count = detail.get("count", len(info.get("students", [])))
+                ok = detail.get("ok", False)
+                ws.append([os.path.basename(src), sheet, count,
+                           "成功" if ok else "失败",
+                           detail.get("out", ""), detail.get("error", "")])
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            head_font = Font(bold=True)
+            head_fill = PatternFill("solid", fgColor="DDEBF7")
+            ok_fill = PatternFill("solid", fgColor="E2EFDA")
+            fail_fill = PatternFill("solid", fgColor="FCE4D6")
+            thin = Side(style="thin", color="BFBFBF")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            for i, w in enumerate([32, 16, 8, 8, 50, 40], start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+            for c in range(1, 7):
+                cell = ws.cell(1, c)
+                cell.font = head_font
+                cell.fill = head_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+            for idx in range(2, ws.max_row + 1):
+                fill = ok_fill if ws.cell(idx, 4).value == "成功" else fail_fill
+                for c in range(1, 7):
+                    cell = ws.cell(idx, c)
+                    cell.border = border
+                    cell.fill = fill
+                    if c in (5, 6):
+                        cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.freeze_panes = "A2"
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            wb.save(path)
+            self.status.config(text=f"汇总报告已导出：{path}")
+            if messagebox.askyesno("导出成功", f"汇总报告已保存到：\n{path}\n\n是否打开？"):
+                os.startfile(path)
+        except Exception as ex:
+            self._error(ex)
 
     # ---------- 拖放 ----------
     def _parse_drop_paths(self, data):
@@ -1758,6 +1980,10 @@ class App(TkinterDnD.Tk):
         list_frame = ttk.LabelFrame(
             outer, text="源表（新模板德育分统计表，可直接把 Excel 文件或文件夹拖入）")
         list_frame.pack(fill="both", expand=True, pady=6)
+        self.ext_placeholder = ttk.Label(
+            list_frame, text="把 Excel 拖到这里，或点上方「添加文件」",
+            foreground="gray")
+        self.ext_placeholder.pack(side="top", fill="x", padx=6, pady=(6, 0))
         self.ext_tree = ttk.Treeview(list_frame, columns=("file",),
                                      show="headings", height=7)
         self.ext_tree.heading("file", text="文件名")
@@ -1768,10 +1994,19 @@ class App(TkinterDnD.Tk):
                            command=self.ext_tree.yview)
         sb.pack(side="right", fill="y", pady=6)
         self.ext_tree.configure(yscrollcommand=sb.set)
+        self._bind_list_context(self.ext_tree, self.ext_items, self.ext_remove)
 
         name_frame = ttk.LabelFrame(
             outer, text="提取名单（必填，每行一个姓名；也可用逗号、顿号分隔）")
         name_frame.pack(fill="x")
+        name_bar = ttk.Frame(name_frame)
+        name_bar.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Button(name_bar, text="从 Excel 导入名单",
+                   command=self.ext_import_names).pack(side="left")
+        ttk.Button(name_bar, text="清除",
+                   command=self.ext_clear_names).pack(side="left", padx=8)
+        ttk.Label(name_bar, text="（自动识别「姓名」列，没有则取第一列）",
+                  foreground="gray").pack(side="left", padx=8)
         self.ext_name_text = tk.Text(name_frame, height=5)
         self.ext_name_text.pack(fill="x", padx=6, pady=6)
 
@@ -1790,7 +2025,7 @@ class App(TkinterDnD.Tk):
         out_frame.columnconfigure(1, weight=1)
 
         ttk.Button(outer, text="开始提取并生成 Excel",
-                   command=self.ext_run).pack(pady=8)
+                   command=self.ext_run).pack(pady=10)
 
     def ext_browse_files(self):
         paths = filedialog.askopenfilenames(
@@ -1814,6 +2049,7 @@ class App(TkinterDnD.Tk):
             item = self.ext_tree.insert("", "end", values=(os.path.basename(f),))
             self.ext_items[item] = f
             added += 1
+        self._refresh_placeholder(self.ext_tree, self.ext_placeholder)
         if added:
             self.status.config(text=f"已添加 {added} 个源表")
 
@@ -1823,12 +2059,14 @@ class App(TkinterDnD.Tk):
             if p:
                 self.ext_path_set.discard(p)
             self.ext_tree.delete(sel)
+        self._refresh_placeholder(self.ext_tree, self.ext_placeholder)
 
     def ext_clear(self):
         self.ext_items.clear()
         self.ext_path_set.clear()
         for i in self.ext_tree.get_children():
             self.ext_tree.delete(i)
+        self._refresh_placeholder(self.ext_tree, self.ext_placeholder)
 
     def _on_drop_extract(self, event):
         self._ext_add_files(self._parse_drop_paths(event.data))
@@ -1855,6 +2093,42 @@ class App(TkinterDnD.Tk):
         if path:
             self.ext_output.set(path)
 
+    def ext_import_names(self):
+        """从 Excel 导入名单：自动识别「姓名」列，没有则取第一列。"""
+        path = filedialog.askopenfilename(
+            title="选择含名单的 Excel",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            ws = wb.active
+            name_col = 1
+            for c in range(1, ws.max_column + 1):
+                v = ws.cell(1, c).value
+                if v and "姓名" in str(v):
+                    name_col = c
+                    break
+            names = []
+            for r in range(2, ws.max_row + 1):
+                v = ws.cell(r, name_col).value
+                if v is not None and str(v).strip():
+                    names.append(str(v).strip())
+            wb.close()
+            if not names:
+                messagebox.showwarning("提示", "未在该 Excel 中找到姓名数据。")
+                return
+            self.ext_name_text.delete("1.0", "end")
+            self.ext_name_text.insert("1.0", "\n".join(names))
+            self.status.config(text=f"已导入 {len(names)} 个姓名")
+        except Exception as ex:
+            self._error(ex)
+
+    def ext_clear_names(self):
+        """一键清空提取名单。"""
+        self.ext_name_text.delete("1.0", "end")
+        self.status.config(text="名单已清空")
+
     def ext_run(self):
         paths = list(self.ext_items.values())
         if not paths:
@@ -1869,6 +2143,8 @@ class App(TkinterDnD.Tk):
             out = os.path.join(os.path.dirname(paths[0]),
                                "证书表扬信提取结果.xlsx")
             self.ext_output.set(out)
+        self.status.config(text="正在提取，请稍候…")
+        self.update_idletasks()
         try:
             rows, missing, multi = collect_person_rows(paths, names)
             if not rows:
@@ -1884,6 +2160,8 @@ class App(TkinterDnD.Tk):
         except Exception as ex:
             self._error(ex)
             return
+        finally:
+            self.status.config(text="就绪")
         found = [n for n in names if n not in missing]
         data_count = sum(1 for r in rows if not r[4])
         msg = (f"已生成提取结果：\n{out}\n\n"
@@ -1901,10 +2179,15 @@ class App(TkinterDnD.Tk):
         outer = ttk.Frame(parent)
         outer.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tip = ttk.LabelFrame(outer, text="功能说明")
-        tip.pack(fill="x")
+        self._sent_help_open = False
+        help_bar = ttk.Frame(outer)
+        help_bar.pack(fill="x")
+        self.sent_help_btn = ttk.Button(
+            help_bar, text="使用说明 ▾", command=self._toggle_sent_help)
+        self.sent_help_btn.pack(side="left", padx=4, pady=(4, 0))
+        self.sent_help_frame = ttk.Frame(outer)
         ttk.Label(
-            tip,
+            self.sent_help_frame,
             text="把「证书/表扬信提取」页生成的结果 Excel 转为完整句子：\n"
                  "· 证书：竞赛/奖项/名次类前加「荣获」，荣誉称号类前加「被评为」，并去掉“证书”二字；\n"
                  "· 表扬信：每条前加「参与」。\n"
@@ -1925,6 +2208,10 @@ class App(TkinterDnD.Tk):
         list_frame = ttk.LabelFrame(
             outer, text="结果文件（第三页签生成的 Excel，可直接拖入文件或文件夹）")
         list_frame.pack(fill="both", expand=True, pady=6)
+        self.sent_placeholder = ttk.Label(
+            list_frame, text="把 Excel 拖到这里，或点上方「添加文件」",
+            foreground="gray")
+        self.sent_placeholder.pack(side="top", fill="x", padx=6, pady=(6, 0))
         self.sent_tree = ttk.Treeview(list_frame, columns=("file",),
                                       show="headings", height=8)
         self.sent_tree.heading("file", text="文件名")
@@ -1935,6 +2222,7 @@ class App(TkinterDnD.Tk):
                            command=self.sent_tree.yview)
         sb.pack(side="right", fill="y", pady=6)
         self.sent_tree.configure(yscrollcommand=sb.set)
+        self._bind_list_context(self.sent_tree, self.sent_items, self.sent_remove)
 
         out_frame = ttk.Frame(outer)
         out_frame.pack(fill="x")
@@ -1952,7 +2240,16 @@ class App(TkinterDnD.Tk):
         out_frame.columnconfigure(1, weight=1)
 
         ttk.Button(outer, text="开始转换并生成 Excel",
-                   command=self.sent_run).pack(pady=8)
+                   command=self.sent_run).pack(pady=10)
+
+    def _toggle_sent_help(self):
+        if self._sent_help_open:
+            self.sent_help_frame.pack_forget()
+            self.sent_help_btn.config(text="使用说明 ▾")
+        else:
+            self.sent_help_frame.pack(fill="x", pady=(2, 0))
+            self.sent_help_btn.config(text="使用说明 ▴")
+        self._sent_help_open = not self._sent_help_open
 
     def sent_browse_files(self):
         paths = filedialog.askopenfilenames(
@@ -1976,6 +2273,7 @@ class App(TkinterDnD.Tk):
             item = self.sent_tree.insert("", "end", values=(os.path.basename(f),))
             self.sent_items[item] = f
             added += 1
+        self._refresh_placeholder(self.sent_tree, self.sent_placeholder)
         if added:
             self.status.config(text=f"已添加 {added} 个结果文件")
 
@@ -1985,12 +2283,14 @@ class App(TkinterDnD.Tk):
             if p:
                 self.sent_path_set.discard(p)
             self.sent_tree.delete(sel)
+        self._refresh_placeholder(self.sent_tree, self.sent_placeholder)
 
     def sent_clear(self):
         self.sent_items.clear()
         self.sent_path_set.clear()
         for i in self.sent_tree.get_children():
             self.sent_tree.delete(i)
+        self._refresh_placeholder(self.sent_tree, self.sent_placeholder)
 
     def _on_drop_sentence(self, event):
         self._sent_add_files(self._parse_drop_paths(event.data))
@@ -2011,6 +2311,8 @@ class App(TkinterDnD.Tk):
             return
         out_dir = self.sent_output.get().strip()
         ok, fail = 0, []
+        self.status.config(text="正在转换，请稍候…")
+        self.update_idletasks()
         try:
             for p in paths:
                 base = os.path.basename(p)
@@ -2027,6 +2329,8 @@ class App(TkinterDnD.Tk):
         except Exception as ex:
             self._error(ex)
             return
+        finally:
+            self.status.config(text="就绪")
         if fail:
             messagebox.showwarning(
                 "完成（有失败）",
@@ -2182,6 +2486,8 @@ class App(TkinterDnD.Tk):
         ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="邮件反馈", command=mail_feedback).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="打开日志目录",
+                   command=self._open_log_dir).grid(row=1, column=0, columnspan=4, pady=(6, 0))
 
     def _safe_start(self, target, top=None):
         try:
@@ -2212,10 +2518,18 @@ class App(TkinterDnD.Tk):
 
     def _error(self, ex):
         try:
+            log_error(ex)
             self.status.config(text="出错了")
-            messagebox.showerror("出错了", f"{ex}")
+            messagebox.showerror(
+                "出错了", f"{ex}\n\n（详情已写入日志，可在「关于」窗打开日志目录）")
         except Exception:
             pass
+
+    def _open_log_dir(self):
+        try:
+            os.startfile(app_config_dir())
+        except Exception as ex:
+            self._error(ex)
 
 
 def main():
