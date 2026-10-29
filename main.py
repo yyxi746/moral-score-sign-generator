@@ -45,7 +45,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.11.0"
+APP_VERSION = "v1.11.1"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -983,13 +983,65 @@ class App(TkinterDnD.Tk):
         self.show_about()
 
     def _first_run_guide(self):
-        messagebox.showinfo(
-            "欢迎使用",
-            "欢迎使用德育分签字表生成器。\n\n"
-            "首次使用需要选择一个 Word 签字表模板（.docx），\n"
-            "下面请选择模板文件；选择后会自动记住。")
+        self._welcome_dialog()
         self._choose_template_dialog()
         self.after(100, self._show_first_about)
+
+    def _welcome_dialog(self):
+        """首次运行欢迎弹窗：绿色主题，点「开始选择模板」后继续。"""
+        top = tk.Toplevel(self)
+        top.title("欢迎使用")
+        top.transient(self)
+        top.configure(bg=CARD_BG)
+        self._set_top_icon(top)
+
+        # 顶部绿色横幅
+        banner = tk.Frame(top, bg=SIDEBAR_BG, height=self._scaled_px(76))
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        tk.Label(banner, text="👋", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 22)).pack(side="left",
+                                          padx=self._scaled_px(18))
+        btxt = tk.Frame(banner, bg=SIDEBAR_BG)
+        btxt.pack(side="left")
+        tk.Label(btxt, text="欢迎使用", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 14, "bold")).pack(anchor="w")
+        tk.Label(btxt, text="德育分签字表生成器", bg=SIDEBAR_BG,
+                 fg="#bfe2d0", font=(UI_FONT, 9)).pack(anchor="w")
+
+        body = tk.Frame(top, bg=CARD_BG)
+        body.pack(fill="x", padx=self._scaled_px(20),
+                  pady=self._scaled_px(16))
+
+        # 说明卡片
+        box = tk.Frame(body, bg=PAGE_BG, highlightthickness=1,
+                       highlightbackground=CARD_BORDER)
+        box.pack(fill="x")
+        tk.Label(box,
+                 text="欢迎使用德育分签字表生成器。\n\n"
+                      "首次使用需要选择一个 Word 签字表模板（.docx）。\n"
+                      "点击下方「开始选择模板」，选择后会自动记住。",
+                 bg=PAGE_BG, fg=INK, font=(UI_FONT, 10), justify="left",
+                 anchor="w", wraplength=self._scaled_px(440),
+                 padx=self._scaled_px(14),
+                 pady=self._scaled_px(12)).pack(fill="x")
+
+        # 底部按钮
+        btns = tk.Frame(body, bg=CARD_BG)
+        btns.pack(fill="x", pady=(self._scaled_px(14), 0))
+        ttk.Button(btns, text="开始选择模板", style="Accent.TButton",
+                   command=top.destroy).pack(side="right")
+
+        # 居中
+        top.update_idletasks()
+        aw = self._scaled_px(500)
+        ah = top.winfo_reqheight()
+        pos_x = self.winfo_rootx() + (self.winfo_width() - aw) // 2
+        pos_y = self.winfo_rooty() + (self.winfo_height() - ah) // 2
+        top.geometry(f"{aw}x{ah}+{max(pos_x, 0)}+{max(pos_y, 0)}")
+
+        top.grab_set()
+        top.wait_window()
 
     def _choose_template_dialog(self):
         """弹出文件框选择模板，选中且校验通过返回 True。"""
@@ -1108,6 +1160,30 @@ class App(TkinterDnD.Tk):
         try:
             u = ctypes.windll.user32
             hwnd = u.GetAncestor(self.winfo_id(), 2)
+            IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+            WM_SETICON = 0x80
+            hbig = u.LoadImageW(None, ico, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            hsml = u.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            if hbig:
+                u.SendMessageW(hwnd, WM_SETICON, 1, hbig)
+            if hsml:
+                u.SendMessageW(hwnd, WM_SETICON, 0, hsml)
+        except Exception:
+            pass
+
+    def _set_top_icon(self, top):
+        """给 Toplevel 弹窗设置标题栏图标（iconbitmap + Windows API）。"""
+        ico = resource_path("app.ico")
+        if not os.path.exists(ico):
+            return
+        try:
+            top.iconbitmap(ico)
+        except Exception:
+            pass
+        try:
+            u = ctypes.windll.user32
+            top.update_idletasks()
+            hwnd = u.GetAncestor(top.winfo_id(), 2)
             IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
             WM_SETICON = 0x80
             hbig = u.LoadImageW(None, ico, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
