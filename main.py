@@ -13,6 +13,8 @@ import re
 import sys
 import json
 import copy
+import ctypes
+from ctypes import wintypes
 import threading
 import traceback
 import datetime
@@ -43,10 +45,23 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.10.0"
+APP_VERSION = "v1.11.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
+
+# ---- UI 配色（框架一：深色侧栏 + 白卡片） ----
+SIDEBAR_BG = "#1f6b45"      # 侧栏深绿
+SIDEBAR_HOVER = "#267a52"   # 侧栏悬停
+SIDEBAR_ACTIVE = "#2f8f5b"  # 侧栏选中
+PAGE_BG = "#f4f7f5"         # 右侧页背景
+CARD_BG = "#ffffff"         # 卡片白
+CARD_BORDER = "#e2e9e5"     # 卡片边框
+PRIMARY = "#2f8f5b"         # 主色
+PRIMARY_DARK = "#27804f"    # 主色按下
+INK = "#2b352f"             # 主文字
+MUTED = "#8a978f"           # 次要文字
+UI_FONT = "Microsoft YaHei UI"
 
 
 # ============================ 通用辅助 ============================
@@ -69,6 +84,20 @@ def is_number_text(text):
         return True
     except (ValueError, TypeError):
         return False
+
+
+def is_name_label_row(text):
+    """判断名单单元格是否为表头/标签（非人名），如「姓名」「班级：xx」。"""
+    s = str(text).strip()
+    if not s:
+        return True
+    if s in ("姓名", "名字", "班级", "序号", "学号", "编号", "备注", "德育分"):
+        return True
+    if re.match(r"^班级\s*[:：]", s):  # 班级：智农25-3班
+        return True
+    if re.fullmatch(r"\d+", s):  # 纯数字（学号）
+        return True
+    return False
 
 
 def fmt_score(v):
@@ -877,15 +906,17 @@ class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.title("德育分签字表生成器")
-        self.geometry("820x900")
-        self.minsize(720, 560)
+        # 按系统 DPI 缩放窗口，避免高 DPI 下开启感知后窗口偏小
+        try:
+            self._dpi = ctypes.windll.user32.GetDpiForSystem()
+        except Exception:
+            self._dpi = 96
+        self._s = max(self._dpi / 96.0, 1.0)
+        # 初始尺寸并居中到屏幕
+        win_w, win_h = self._scaled_px(1257), self._scaled_px(700)
+        self.geometry(f"{win_w}x{win_h}+0+0")
+        self.minsize(self._scaled_px(760), self._scaled_px(560))
         self._visited_tabs = set()  # 已访问过的页签，避免切换时反复重置窗口尺寸
-        ico = resource_path("app.ico")
-        if os.path.exists(ico):
-            try:
-                self.iconbitmap(default=ico)
-            except Exception:
-                pass
 
         cfg = load_config()
         self._skip_version = cfg.get("skip_version", "")
@@ -930,7 +961,11 @@ class App(TkinterDnD.Tk):
         self.sent_items = {}        # tree item -> 文件路径
         self.sent_path_set = set()  # 已加入文件去重
 
+        self._setup_style()
         self._build_ui()
+        self._center_window()
+        self._set_window_icon()
+        self.after(200, self._set_window_icon)
 
         if not os.path.exists(init_tpl):
             self.after(300, self._first_run_guide)
@@ -1036,41 +1071,252 @@ class App(TkinterDnD.Tk):
 
         skip.bind("<Button-1>", do_skip)
 
+    def _scaled_px(self, v):
+        """按 DPI 把逻辑像素换算成物理像素。"""
+        return int(round(v * self._s))
+
+    def _scaled_geo(self, w, h):
+        return f"{self._scaled_px(w)}x{self._scaled_px(h)}"
+
+    def _center_window(self):
+        """按窗口外框（含标题栏/边框）把主窗口精确居中到屏幕。"""
+        try:
+            self.update_idletasks()
+            u = ctypes.windll.user32
+            # winfo_id 是 Tk 内部窗口，需取真正的顶层外框窗口
+            hwnd = u.GetAncestor(self.winfo_id(), 2)  # GA_ROOT
+            r = wintypes.RECT()
+            u.GetWindowRect(hwnd, ctypes.byref(r))
+            ow, oh = r.right - r.left, r.bottom - r.top
+            sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+            x = max((sw - ow) // 2, 0)
+            y = max((sh - oh) // 2, 0)
+            cw, ch = self._scaled_px(1257), self._scaled_px(700)
+            self.geometry(f"{cw}x{ch}+{x}+{y}")
+        except Exception:
+            pass
+
+    def _set_window_icon(self):
+        """设置标题栏图标：Tk iconbitmap 与 Windows API 双保险。"""
+        ico = resource_path("app.ico")
+        if not os.path.exists(ico):
+            return
+        try:
+            self.iconbitmap(default=ico)
+        except Exception:
+            pass
+        try:
+            u = ctypes.windll.user32
+            hwnd = u.GetAncestor(self.winfo_id(), 2)
+            IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+            WM_SETICON = 0x80
+            hbig = u.LoadImageW(None, ico, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            hsml = u.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+            if hbig:
+                u.SendMessageW(hwnd, WM_SETICON, 1, hbig)
+            if hsml:
+                u.SendMessageW(hwnd, WM_SETICON, 0, hsml)
+        except Exception:
+            pass
+
+    def _setup_style(self):
+        """全局 ttk 主题：clam + 微软雅黑 + 白卡片 + 绿色表头/主按钮。"""
+        st = ttk.Style(self)
+        try:
+            st.theme_use("clam")
+        except Exception:
+            pass
+        base = (UI_FONT, 10)
+
+        # 白色卡片内的默认容器与文字
+        st.configure("TFrame", background=CARD_BG)
+        st.configure("TLabel", background=CARD_BG, foreground=INK, font=base)
+        st.configure("Muted.TLabel", background=CARD_BG, foreground=MUTED, font=base)
+
+        # 浅灰页背景区（标题区）
+        st.configure("Page.TFrame", background=PAGE_BG)
+        st.configure("Page.TLabel", background=PAGE_BG, foreground=INK)
+        st.configure("PageTitle.TLabel", background=PAGE_BG, foreground="#22301f",
+                     font=(UI_FONT, 16, "bold"))
+        st.configure("PageDesc.TLabel", background=PAGE_BG, foreground=MUTED,
+                     font=(UI_FONT, 10))
+
+        # 卡片式分组框
+        st.configure("TLabelframe", background=CARD_BG, bordercolor=CARD_BORDER,
+                     relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=CARD_BG, foreground=PRIMARY,
+                     font=(UI_FONT, 10, "bold"))
+
+        # 输入控件
+        st.configure("TEntry", fieldbackground=CARD_BG, bordercolor=CARD_BORDER,
+                     lightcolor=CARD_BORDER, darkcolor=CARD_BORDER, insertcolor=INK)
+        st.configure("TCombobox", fieldbackground=CARD_BG, background=CARD_BG,
+                     bordercolor=CARD_BORDER, arrowcolor=PRIMARY, insertcolor=INK)
+        st.map("TCombobox",
+               fieldbackground=[("readonly", CARD_BG)],
+               selectbackground=[("readonly", "#e6f4ec")],
+               selectforeground=[("readonly", INK)],
+               bordercolor=[("focus", PRIMARY)])
+        st.configure("TCheckbutton", background=CARD_BG, foreground=INK,
+                     font=base,
+                     indicatorbackground=CARD_BG,
+                     indicatorforeground=PRIMARY,
+                     upperbordercolor=CARD_BORDER,
+                     lowerbordercolor=CARD_BORDER)
+        st.map("TCheckbutton", background=[("active", CARD_BG)])
+
+        # 普通按钮（白底描边）
+        st.configure("TButton", background=CARD_BG, foreground=INK,
+                     bordercolor=CARD_BORDER, focusthickness=0, font=base,
+                     relief="solid", borderwidth=1)
+        st.map("TButton",
+               background=[("active", "#f0f5f2")],
+               bordercolor=[("active", PRIMARY)],
+               foreground=[("active", PRIMARY)])
+
+        # 主按钮（绿色）
+        st.configure("Accent.TButton", background=PRIMARY, foreground="#ffffff",
+                     bordercolor=PRIMARY, font=(UI_FONT, 10, "bold"),
+                     focusthickness=0, relief="flat", padding=(10, 6))
+        st.map("Accent.TButton",
+               background=[("active", PRIMARY_DARK), ("pressed", PRIMARY_DARK)],
+               foreground=[("active", "#ffffff")])
+
+        # 表格
+        st.configure("Treeview", background=CARD_BG, fieldbackground=CARD_BG,
+                     bordercolor=CARD_BORDER, rowheight=27, font=base)
+        st.configure("Treeview.Heading", background=PRIMARY, foreground="#ffffff",
+                     font=(UI_FONT, 10, "bold"), bordercolor=PRIMARY, relief="flat")
+        st.map("Treeview",
+               background=[("selected", "#dcefe4")],
+               foreground=[("selected", INK)])
+        st.map("Treeview.Heading", background=[("active", PRIMARY_DARK)])
+
+        # 进度条 / 滚动条
+        st.configure("Horizontal.TProgressbar", background=PRIMARY,
+                     troughcolor="#e9efec", bordercolor="#e9efec")
+        st.configure("Vertical.TScrollbar", background=CARD_BORDER,
+                     troughcolor=CARD_BG, bordercolor=CARD_BG, arrowcolor=PRIMARY)
+
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        menubar = tk.Menu(self)
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="关于…", command=self.show_about)
-        menubar.add_cascade(label="帮助", menu=help_menu, underline=0)
-        self.config(menu=menubar)
+        # ---------- 主骨架：左侧深色导航 + 右侧内容区 ----------
+        shell = tk.Frame(self)
+        shell.pack(fill="both", expand=True)
 
-        bottom = ttk.Frame(self)
-        bottom.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        sidebar = tk.Frame(shell, bg=SIDEBAR_BG, width=192)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        self._sidebar = sidebar
+
+        # 品牌区
+        brand = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        brand.pack(fill="x", padx=16, pady=(20, 18))
+        brand_lg = tk.Frame(brand, bg=SIDEBAR_ACTIVE, width=38, height=38)
+        brand_lg.pack(side="left")
+        brand_lg.pack_propagate(False)
+        tk.Label(brand_lg, text="📝", bg=SIDEBAR_ACTIVE, fg="#ffffff",
+                 font=(UI_FONT, 16)).pack(expand=True)
+        brand_txt = tk.Frame(brand, bg=SIDEBAR_BG)
+        brand_txt.pack(side="left", padx=10)
+        tk.Label(brand_txt, text="德育分签字表", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 11, "bold")).pack(anchor="w")
+        tk.Label(brand_txt, text="生成器 · 农院资信", bg=SIDEBAR_BG, fg="#9fcdb6",
+                 font=(UI_FONT, 8)).pack(anchor="w")
+
+        # 导航项
+        navwrap = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        navwrap.pack(fill="both", expand=True, padx=10)
+        self._nav_buttons = {}
+        for key, icon, text in (
+                ("single", "📄", "单文件处理"),
+                ("batch", "📚", "批量处理"),
+                ("extract", "🏅", "证书/表扬信提取"),
+                ("sentence", "🔤", "句子形式转换")):
+            item = tk.Frame(navwrap, bg=SIDEBAR_BG, cursor="hand2")
+            item.pack(fill="x", pady=2)
+            lbl = tk.Label(item, text=f"{icon}  {text}", bg=SIDEBAR_BG,
+                           fg="#bfe2d0", font=(UI_FONT, 10), anchor="w",
+                           padx=12, pady=9)
+            lbl.pack(fill="x")
+            for w in (item, lbl):
+                w.bind("<Button-1>", lambda e, k=key: self._switch_tab(k))
+                w.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
+                w.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
+            self._nav_buttons[key] = (item, lbl)
+
+        # 侧栏底部：关于 / 日志 / 版本
+        foot = tk.Frame(sidebar, bg=SIDEBAR_BG)
+        foot.pack(side="bottom", fill="x", padx=10, pady=12)
+
+        def foot_row(text, cmd):
+            f = tk.Frame(foot, bg=SIDEBAR_BG, cursor="hand2")
+            f.pack(fill="x")
+            l = tk.Label(f, text=text, bg=SIDEBAR_BG, fg="#bfe2d0",
+                         font=(UI_FONT, 9), anchor="w", padx=12, pady=6)
+            l.pack(fill="x")
+            l.bind("<Button-1>", lambda e: cmd())
+            f.bind("<Button-1>", lambda e: cmd())
+
+        foot_row("ⓘ  关于 / 使用说明", self.show_about)
+        foot_row("📂  错误日志", self._open_log_dir)
+        tk.Label(foot, text=APP_VERSION, bg=SIDEBAR_BG, fg="#8fbda4",
+                 font=(UI_FONT, 9), anchor="w", padx=12,
+                 pady=8).pack(fill="x")
+
+        # 右侧区
+        right = tk.Frame(shell, bg=PAGE_BG)
+        right.pack(side="left", fill="both", expand=True)
+        self._right = right
+
+        # 底部状态栏（右侧内）
+        bottom = tk.Frame(right, bg=CARD_BG, highlightthickness=1,
+                          highlightbackground=CARD_BORDER)
+        bottom.pack(side="bottom", fill="x")
         self._bottom = bottom
-        self._make_info_button(bottom).pack(side="left")
-        self.status = ttk.Label(bottom, text="就绪", foreground="gray")
-        self.status.pack(side="left", padx=10)
+        self.status = tk.Label(bottom, text="就绪", bg=CARD_BG, fg=MUTED,
+                               font=(UI_FONT, 9))
+        self.status.pack(side="left", padx=14, pady=7)
 
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # 内容容器：4 个页签叠放
+        content = tk.Frame(right, bg=PAGE_BG)
+        content.pack(side="top", fill="both", expand=True)
+        self._content = content
+        self._pages = {}
+        self._cards = {}
+        for key, title, desc in (
+                ("single", "单文件处理", "从一个德育分统计表生成 Word 签字表，生成前可核对预览。"),
+                ("batch", "批量处理", "一次添加多个班级 / 学期统计表，批量生成签字表。"),
+                ("extract", "证书 / 表扬信提取", "按名单从多张统计表跨月合并提取证书、表扬信。"),
+                ("sentence", "句子形式转换", "把提取结果转成「荣获 / 参与」完整句子。")):
+            page = tk.Frame(content, bg=PAGE_BG)
+            page.grid(row=0, column=0, sticky="nsew")
+            head = tk.Frame(page, bg=PAGE_BG)
+            head.pack(side="top", fill="x", padx=18, pady=(14, 10))
+            tk.Label(head, text=title, bg=PAGE_BG, fg="#22301f",
+                     font=(UI_FONT, 16, "bold")).pack(side="left")
+            tk.Label(head, text=desc, bg=PAGE_BG, fg=MUTED,
+                     font=(UI_FONT, 9)).pack(side="left", padx=12)
+            cwrap = tk.Frame(page, bg=PAGE_BG)
+            cwrap.pack(side="top", fill="both", expand=True, padx=14, pady=(0, 12))
+            card = tk.Frame(cwrap, bg=CARD_BG, highlightthickness=1,
+                            highlightbackground=CARD_BORDER)
+            card.pack(fill="both", expand=True)
+            self._pages[key] = page
+            self._cards[key] = card
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
 
-        root = ttk.Frame(self.nb)
-        self.nb.add(root, text="单文件处理")
-        batch = ttk.Frame(self.nb)
-        self.nb.add(batch, text="批量处理")
-        self.batch_tab = batch
+        root = self._cards["single"]
+        batch = self._cards["batch"]
+        extract = self._cards["extract"]
+        sentence = self._cards["sentence"]
+        self.batch_tab = self._pages["batch"]
+        self.extract_tab = self._pages["extract"]
+        self.sentence_tab = self._pages["sentence"]
         self._build_batch_tab(batch)
-
-        extract = ttk.Frame(self.nb)
-        self.nb.add(extract, text="证书/表扬信提取")
-        self.extract_tab = extract
         self._build_extract_tab(extract)
-
-        sentence = ttk.Frame(self.nb)
-        self.nb.add(sentence, text="句子形式转换")
-        self.sentence_tab = sentence
         self._build_sentence_tab(sentence)
 
         r = 0
@@ -1174,10 +1420,15 @@ class App(TkinterDnD.Tk):
         root.rowconfigure(9, weight=1)
 
         # 文件拖放支持
-        register_drop_recursive(root, self._on_drop_single)
-        register_drop_recursive(batch, self._on_drop_batch)
-        register_drop_recursive(extract, self._on_drop_extract)
-        register_drop_recursive(sentence, self._on_drop_sentence)
+        register_drop_recursive(self._pages["single"], self._on_drop_single)
+        register_drop_recursive(self._pages["batch"], self._on_drop_batch)
+        register_drop_recursive(self._pages["extract"], self._on_drop_extract)
+        register_drop_recursive(self._pages["sentence"], self._on_drop_sentence)
+
+        # 默认显示单文件处理页
+        self._active_tab = "single"
+        self._pages["single"].tkraise()
+        self._update_nav_style("single")
 
     # ---------- 文件选择 ----------
     def browse_excel(self):
@@ -1408,24 +1659,34 @@ class App(TkinterDnD.Tk):
         tree.bind("<Button-3>", on_right)
 
     # ---------- 批量处理页 ----------
-    def _on_tab_changed(self, event=None):
-        """首次进入某页签时给一个建议窗口尺寸；之后不再强制重置，
-        保留用户手动缩放后的大小。"""
-        try:
-            cur = self.nb.select()
-            if cur in self._visited_tabs:
-                return
-            self._visited_tabs.add(cur)
-            if cur == str(self.batch_tab):
-                self.geometry("820x800")
-            elif cur == str(self.extract_tab):
-                self.geometry("820x720")
-            elif cur == str(self.sentence_tab):
-                self.geometry("820x620")
+    # ---------- 侧栏导航切换 ----------
+    def _switch_tab(self, key):
+        """切换右侧显示的页签，并刷新侧栏选中样式。"""
+        if key not in self._pages:
+            return
+        self._active_tab = key
+        self._pages[key].tkraise()
+        # 所有页签保持统一窗口大小（与单文件页一致），不随切换改变尺寸
+        self._update_nav_style(key)
+
+    def _update_nav_style(self, active):
+        for key, (item, lbl) in self._nav_buttons.items():
+            if key == active:
+                item.config(bg=SIDEBAR_ACTIVE)
+                lbl.config(bg=SIDEBAR_ACTIVE, fg="#ffffff",
+                           font=(UI_FONT, 10, "bold"))
             else:
-                self.geometry("820x900")
-        except Exception:
-            pass
+                item.config(bg=SIDEBAR_BG)
+                lbl.config(bg=SIDEBAR_BG, fg="#bfe2d0",
+                           font=(UI_FONT, 10))
+
+    def _nav_hover(self, key, entering):
+        if self._active_tab == key:
+            return
+        c = SIDEBAR_HOVER if entering else SIDEBAR_BG
+        item, lbl = self._nav_buttons[key]
+        item.config(bg=c)
+        lbl.config(bg=c)
 
     def _build_batch_tab(self, parent):
         outer = ttk.Frame(parent)
@@ -1954,7 +2215,7 @@ class App(TkinterDnD.Tk):
             self.excel_path.set(files[0])
             self.load_excel()
         else:
-            self.nb.select(self.batch_tab)
+            self._switch_tab("batch")
             self._batch_add_files(files)
 
     def _on_drop_batch(self, event):
@@ -2094,7 +2355,8 @@ class App(TkinterDnD.Tk):
             self.ext_output.set(path)
 
     def ext_import_names(self):
-        """从 Excel 导入名单：自动识别「姓名」列，没有则取第一列。"""
+        """从 Excel 导入名单：自动识别姓名列，自动跳过「班级：xx」「姓名」
+        等表头标签，直接导入全部。"""
         path = filedialog.askopenfilename(
             title="选择含名单的 Excel",
             filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
@@ -2103,17 +2365,27 @@ class App(TkinterDnD.Tk):
         try:
             wb = openpyxl.load_workbook(path, data_only=True)
             ws = wb.active
-            name_col = 1
-            for c in range(1, ws.max_column + 1):
-                v = ws.cell(1, c).value
-                if v and "姓名" in str(v):
-                    name_col = c
+            # 在前 5 行内找含「姓名」的表头（兼容表头不在第 1 行）
+            name_col, header_row = 1, 1
+            found = False
+            for hr in range(1, min(6, ws.max_row + 1)):
+                for c in range(1, ws.max_column + 1):
+                    v = ws.cell(hr, c).value
+                    if v and "姓名" in str(v):
+                        name_col, header_row, found = c, hr, True
+                        break
+                if found:
                     break
             names = []
-            for r in range(2, ws.max_row + 1):
+            for r in range(header_row + 1, ws.max_row + 1):
                 v = ws.cell(r, name_col).value
-                if v is not None and str(v).strip():
-                    names.append(str(v).strip())
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if not s or is_name_label_row(s):
+                    continue
+                if s not in names:
+                    names.append(s)
             wb.close()
             if not names:
                 messagebox.showwarning("提示", "未在该 Excel 中找到姓名数据。")
@@ -2164,15 +2436,7 @@ class App(TkinterDnD.Tk):
             self.status.config(text="就绪")
         found = [n for n in names if n not in missing]
         data_count = sum(1 for r in rows if not r[4])
-        msg = (f"已生成提取结果：\n{out}\n\n"
-               f"涉及 {len(found)} 人，共 {data_count} 条记录。")
-        if multi:
-            msg += ("\n\n以下人员在多个源表中出现，已分别成行，"
-                    "并在末尾追加浅橙色「（合计）」汇总行：\n"
-                    + "、".join(multi))
-        if missing:
-            msg += "\n\n以下人员未在源表中找到：\n" + "、".join(missing)
-        messagebox.showinfo("完成", msg)
+        self._extract_done_dialog(out, len(found), data_count, multi, missing)
 
     # ---------- 句子形式转换页 ----------
     def _build_sentence_tab(self, parent):
@@ -2438,18 +2702,36 @@ class App(TkinterDnD.Tk):
         top = tk.Toplevel(self)
         top.title("关于")
         top.transient(self)
+        top.configure(bg=CARD_BG)
         top.grab_set()
         top.lift()
         top.focus_force()
-        top.resizable(True, True)
-        top.minsize(440, 440)
-        top.geometry(f"480x480+{self.winfo_x()+160}+{self.winfo_y()+140}")
 
-        ttk.Label(top, text="德育分签字表生成器",
-                  font=("Microsoft YaHei UI", 15, "bold")).pack(pady=(18, 4))
-        ttk.Label(top, text=f"版本 {APP_VERSION}").pack()
-        ttk.Label(top,
-                  text="根据 Excel 德育分统计表，自动生成 Word 德育分确认签字表。").pack(pady=(10, 2))
+        # 宽度固定，高度在内容构建后按实际内容自适应并居中（见方法末尾）
+        top.minsize(self._scaled_px(500), self._scaled_px(460))
+
+        # 顶部绿色横幅
+        banner = tk.Frame(top, bg=SIDEBAR_BG, height=self._scaled_px(96))
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        tk.Label(banner, text="📝", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 26)).pack(side="left",
+                                          padx=self._scaled_px(20))
+        btxt = tk.Frame(banner, bg=SIDEBAR_BG)
+        btxt.pack(side="left")
+        tk.Label(btxt, text="德育分签字表生成器", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 15, "bold")).pack(anchor="w")
+        tk.Label(btxt, text=f"版本 {APP_VERSION} · 农院资信",
+                 bg=SIDEBAR_BG, fg="#bfe2d0",
+                 font=(UI_FONT, 10)).pack(anchor="w")
+
+        body = tk.Frame(top, bg=CARD_BG)
+        body.pack(fill="x", padx=self._scaled_px(20),
+                  pady=self._scaled_px(14))
+
+        tk.Label(body, text="根据 Excel 德育分统计表，自动生成 Word 德育分确认签字表。",
+                 bg=CARD_BG, fg=INK, font=(UI_FONT, 10), justify="left",
+                 anchor="w").pack(anchor="w")
 
         about_text = (
             "本工具专为农院资信管理员设计，旨在简化日常业务操作流程，"
@@ -2458,19 +2740,30 @@ class App(TkinterDnD.Tk):
             "做好复核工作。若在使用过程中遇到程序报错、数据异常或其他相关问题，"
             "可联系25级王子瑶反馈，联系邮箱：yaowzxi@163.com。"
         )
-        box = ttk.LabelFrame(top, text="使用说明与反馈", padding=12)
-        box.pack(fill="x", padx=18, pady=(10, 6))
-        ttk.Label(box, text=about_text, wraplength=408, justify="left",
-                  anchor="w").pack(fill="x")
+        box = tk.Frame(body, bg=CARD_BG, highlightthickness=1,
+                       highlightbackground=CARD_BORDER)
+        box.pack(fill="x", pady=self._scaled_px(12))
+        tk.Label(box, text="使用说明与反馈", bg=CARD_BG, fg=PRIMARY,
+                 font=(UI_FONT, 10, "bold"), anchor="w",
+                 padx=self._scaled_px(12)).pack(fill="x",
+                                                pady=self._scaled_px(8))
+        tk.Label(box, text=about_text, bg=CARD_BG, fg=INK,
+                 font=(UI_FONT, 10), justify="left", anchor="w",
+                 wraplength=self._scaled_px(510),
+                 padx=self._scaled_px(12)).pack(anchor="w",
+                                                pady=self._scaled_px(8))
 
-        ttk.Label(top, text="Python · tkinter · openpyxl · python-docx",
-                  foreground="gray").pack()
-        link = ttk.Label(top, text=GITHUB_URL, foreground="#0066cc", cursor="hand2")
-        link.pack(pady=10)
+        tk.Label(body, text="Python · tkinter · openpyxl · python-docx",
+                 bg=CARD_BG, fg=MUTED, font=(UI_FONT, 9)).pack(anchor="w")
+        link = tk.Label(body, text=GITHUB_URL, bg=CARD_BG, fg="#0066cc",
+                        cursor="hand2", font=(UI_FONT, 9))
+        link.pack(anchor="w", pady=self._scaled_px(6))
         link.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
 
-        btns = ttk.Frame(top)
-        btns.pack(pady=6)
+        btns = tk.Frame(body, bg=CARD_BG)
+        btns.pack(fill="x", pady=self._scaled_px(12))
+        for c in range(4):
+            btns.columnconfigure(c, weight=1)
 
         def copy_link():
             self.clipboard_clear()
@@ -2482,12 +2775,30 @@ class App(TkinterDnD.Tk):
                 "mailto:yaowzxi@163.com?subject=德育分签字表生成器问题反馈")
 
         ttk.Button(btns, text="访问 GitHub",
-                   command=lambda: webbrowser.open(GITHUB_URL)).grid(row=0, column=0, padx=4)
-        ttk.Button(btns, text="复制链接", command=copy_link).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="邮件反馈", command=mail_feedback).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="关闭", command=top.destroy).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="打开日志目录",
-                   command=self._open_log_dir).grid(row=1, column=0, columnspan=4, pady=(6, 0))
+                   command=lambda: webbrowser.open(GITHUB_URL)).grid(
+            row=0, column=0, padx=3, sticky="ew")
+        ttk.Button(btns, text="复制链接",
+                   command=copy_link).grid(row=0, column=1, padx=3, sticky="ew")
+        ttk.Button(btns, text="邮件反馈",
+                   command=mail_feedback).grid(row=0, column=2, padx=3, sticky="ew")
+        ttk.Button(btns, text="关闭", style="Accent.TButton",
+                   command=top.destroy).grid(row=0, column=3, padx=3, sticky="ew")
+
+        # 打开日志目录做成低调的小链接，不与主按钮抢视觉
+        loglink = tk.Label(body, text="打开日志目录", bg=CARD_BG, fg=MUTED,
+                           cursor="hand2", font=(UI_FONT, 9))
+        loglink.pack(pady=(2, 0))
+        loglink.bind("<Button-1>", lambda e: self._open_log_dir())
+        loglink.bind("<Enter>", lambda e: loglink.config(fg=PRIMARY))
+        loglink.bind("<Leave>", lambda e: loglink.config(fg=MUTED))
+
+        # 按内容自适应高度，并把关于窗居中到主窗口
+        top.update_idletasks()
+        aw = self._scaled_px(580)
+        ah = top.winfo_reqheight()
+        pos_x = self.winfo_rootx() + (self.winfo_width() - aw) // 2
+        pos_y = self.winfo_rooty() + (self.winfo_height() - ah) // 2
+        top.geometry(f"{aw}x{ah}+{max(pos_x, 0)}+{max(pos_y, 0)}")
 
     def _safe_start(self, target, top=None):
         try:
@@ -2516,6 +2827,102 @@ class App(TkinterDnD.Tk):
         ttk.Button(btns, text="关闭", command=top.destroy).grid(
             row=0, column=2, padx=8)
 
+    def _extract_done_dialog(self, out, found_count, data_count, multi, missing):
+        """提取完成弹窗：绿色主题，分区显示输出路径、统计、多源表/未找到人员。"""
+        top = tk.Toplevel(self)
+        top.title("提取完成")
+        top.transient(self)
+        top.grab_set()
+        top.configure(bg=CARD_BG)
+
+        # 顶部绿色横幅
+        banner = tk.Frame(top, bg=SIDEBAR_BG, height=self._scaled_px(76))
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        tk.Label(banner, text="✅", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 22)).pack(side="left",
+                                          padx=self._scaled_px(18))
+        btxt = tk.Frame(banner, bg=SIDEBAR_BG)
+        btxt.pack(side="left")
+        tk.Label(btxt, text="提取完成", bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 14, "bold")).pack(anchor="w")
+        tk.Label(btxt, text="证书 / 表扬信结果已生成", bg=SIDEBAR_BG,
+                 fg="#bfe2d0", font=(UI_FONT, 9)).pack(anchor="w")
+
+        body = tk.Frame(top, bg=CARD_BG)
+        body.pack(fill="x", padx=self._scaled_px(20),
+                  pady=self._scaled_px(14))
+
+        # 输出路径框
+        pathbox = tk.Frame(body, bg=PAGE_BG, highlightthickness=1,
+                           highlightbackground=CARD_BORDER)
+        pathbox.pack(fill="x")
+        tk.Label(pathbox, text="输出文件", bg=PAGE_BG, fg=PRIMARY,
+                 font=(UI_FONT, 9, "bold"), anchor="w",
+                 padx=self._scaled_px(10)).pack(
+            fill="x", pady=(self._scaled_px(8), 0))
+        tk.Label(pathbox, text=out, bg=PAGE_BG, fg=INK,
+                 font=(UI_FONT, 9), justify="left", anchor="w",
+                 wraplength=self._scaled_px(460),
+                 padx=self._scaled_px(10)).pack(
+            fill="x", pady=self._scaled_px(4))
+
+        # 统计
+        tk.Label(body, text=f"涉及 {found_count} 人，共 {data_count} 条记录。",
+                 bg=CARD_BG, fg=INK, font=(UI_FONT, 10),
+                 anchor="w").pack(fill="x", pady=self._scaled_px(10))
+
+        # 多源表人员
+        if multi:
+            mb = tk.Frame(body, bg="#fdf6e3", highlightthickness=1,
+                          highlightbackground="#e8d48b")
+            mb.pack(fill="x", pady=(0, self._scaled_px(8)))
+            tk.Label(mb,
+                     text="以下人员在多个源表中出现，已分别成行，并追加浅橙色「（合计）」汇总行：",
+                     bg="#fdf6e3", fg="#8a6d1a", font=(UI_FONT, 9),
+                     justify="left", anchor="w",
+                     wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10),
+                     pady=self._scaled_px(6)).pack(fill="x")
+            tk.Label(mb, text="、".join(multi), bg="#fdf6e3", fg=INK,
+                     font=(UI_FONT, 9), justify="left", anchor="w",
+                     wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10)).pack(
+                fill="x", pady=(0, self._scaled_px(6)))
+
+        # 未找到人员
+        if missing:
+            xb = tk.Frame(body, bg="#fdecec", highlightthickness=1,
+                          highlightbackground="#e6a8a8")
+            xb.pack(fill="x", pady=(0, self._scaled_px(8)))
+            tk.Label(xb, text="以下人员未在源表中找到：", bg="#fdecec",
+                     fg="#b03a3a", font=(UI_FONT, 9, "bold"), anchor="w",
+                     padx=self._scaled_px(10),
+                     pady=self._scaled_px(6)).pack(fill="x")
+            tk.Label(xb, text="、".join(missing), bg="#fdecec", fg=INK,
+                     font=(UI_FONT, 9), justify="left", anchor="w",
+                     wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10)).pack(
+                fill="x", pady=(0, self._scaled_px(6)))
+
+        # 底部按钮
+        btns = tk.Frame(body, bg=CARD_BG)
+        btns.pack(fill="x", pady=(self._scaled_px(6), 0))
+        ttk.Button(btns, text="打开文件夹",
+                   command=lambda: self._safe_start(
+                       os.path.dirname(out), None)).pack(side="left")
+        ttk.Button(btns, text="完成", style="Accent.TButton",
+                   command=top.destroy).pack(side="right")
+
+        # 自适应高度并居中到主窗口
+        top.update_idletasks()
+        aw = self._scaled_px(520)
+        max_h = self.winfo_screenheight() - self._scaled_px(80)
+        ah = min(top.winfo_reqheight(), max_h)
+        pos_x = self.winfo_rootx() + (self.winfo_width() - aw) // 2
+        pos_y = self.winfo_rooty() + (self.winfo_height() - ah) // 2
+        top.geometry(f"{aw}x{ah}+{max(pos_x, 0)}+{max(pos_y, 0)}")
+
     def _error(self, ex):
         try:
             log_error(ex)
@@ -2532,7 +2939,31 @@ class App(TkinterDnD.Tk):
             self._error(ex)
 
 
+def enable_dpi_awareness():
+    """让进程按物理像素渲染，避免 Windows 位图拉伸导致 tkinter 字体发虚。"""
+    if sys.platform != "win32":
+        return
+    # Windows 10 1703+：Per-Monitor V2
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(-4):
+            return
+    except Exception:
+        pass
+    # Windows 8.1+：Per-Monitor
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    # 兜底：System DPI Aware
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def main():
+    enable_dpi_awareness()
     App().mainloop()
 
 
