@@ -45,7 +45,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.11.1"
+APP_VERSION = "v1.11.5"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -738,6 +738,81 @@ def extract_semester(filename):
     return os.path.splitext(os.path.basename(filename))[0]
 
 
+_TERM_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+
+
+def parse_semester(semester_str):
+    """从学期字符串解析 (起始年, 结束年, 第几学期)，如「2025-2026学年第二学期」；
+    解析不到返回 None。"""
+    m = re.search(r"(\d{4})[-–—](\d{4})学年第([一二三四五六1-6])学期",
+                  str(semester_str or ""))
+    if not m:
+        return None
+    start_y, end_y = int(m.group(1)), int(m.group(2))
+    t = m.group(3)
+    term = _TERM_CN_NUM.get(t, int(t) if t.isdigit() else 0)
+    return start_y, end_y, term
+
+
+def _year_for_month(month, start_y, end_y, term):
+    """根据月份和学期判断年份：
+    第一学期（秋）9-12月用起始年，跨年1-2月用结束年；第二学期一律用结束年。"""
+    if term == 1 and month >= 9:
+        return start_y
+    return end_y
+
+
+_CN_MONTHS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+              "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+# 中文月份 token：十一/十二 必须排在 十 前面，避免「十一月」被截成「十月」
+_CN_MONTH_TOK = r"十一|十二|十|一|二|三|四|五|六|七|八|九"
+
+
+def _month_of_token(tok):
+    if tok.isdigit():
+        v = int(tok)
+        return v if 1 <= v <= 12 else None
+    return _CN_MONTHS.get(tok)
+
+
+def add_year_to_date(text, semester_str):
+    """把条目里的简短日期按学期补全年份，完整日期放到最前面（中文格式）。
+    支持：开头「3.6」→「2026年3月6日」；开头/中间「8月」「五月」→「2026年8月」并移到最前。
+    阿拉伯数字与中文数字月份都识别；无法解析学期时原样返回。"""
+    info = parse_semester(semester_str)
+    if not info:
+        return text
+    start_y, end_y, term = info
+    s = str(text).strip()
+
+    # 1) 开头「月.日」（仅阿拉伯数字）
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})(.*)$", s)
+    if m:
+        mon, day, rest = int(m.group(1)), int(m.group(2)), m.group(3)
+        if 1 <= mon <= 12 and 1 <= day <= 31:
+            y = _year_for_month(mon, start_y, end_y, term)
+            return f"{y}年{mon}月{day}日{rest}"
+
+    # 2) 开头「月 / 月份」（阿拉伯或中文）
+    m = re.match(r"^(\d{1,2}|" + _CN_MONTH_TOK + r")月份?(.*)$", s)
+    if m:
+        mon = _month_of_token(m.group(1))
+        if mon:
+            y = _year_for_month(mon, start_y, end_y, term)
+            return f"{y}年{mon}月{m.group(2)}"
+
+    # 3) 中间的「月 / 月份」（阿拉伯或中文）：提取后移到最前
+    m = re.search(r"(\d{1,2}|" + _CN_MONTH_TOK + r")月份?", s)
+    if m:
+        mon = _month_of_token(m.group(1))
+        if mon:
+            y = _year_for_month(mon, start_y, end_y, term)
+            rest = (s[:m.start()] + s[m.end():]).strip()
+            return f"{y}年{mon}月{rest}"
+
+    return s
+
+
 def collect_person_rows(paths, wanted_names):
     """按名单在多个源文件中提取（姓名模糊匹配：自动去空格、去括号后缀）。
     rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
@@ -752,11 +827,14 @@ def collect_person_rows(paths, wanted_names):
         except Exception:
             data = {}
         if data:
+            sem = extract_semester(os.path.basename(p))
             norm_data = {}
             for k, v in data.items():
                 nk = normalize_name(k)
                 if nk and nk not in norm_data:
-                    norm_data[nk] = v
+                    certs = [add_year_to_date(x, sem) for x in v[0]]
+                    praises = [add_year_to_date(x, sem) for x in v[1]]
+                    norm_data[nk] = (certs, praises)
             file_data.append((os.path.basename(p), norm_data))
     rows, missing, multi_names = [], [], []
     for name in wanted_names:
@@ -847,15 +925,50 @@ def cert_sentence_prefix(item):
     return "荣获"
 
 
+# 开头已补全的完整日期，如「2026年3月」「2026年7月5日」
+_LEAD_DATE_RE = re.compile(r"^(\d{4}年\d{1,2}月(?:\d{1,2}日)?)(.*)$")
+
+
 def to_cert_sentence(item):
-    """证书条目转句子：去掉「证书」二字后按类型加「荣获/被评为」前缀。"""
+    """证书条目转句子：去掉「证书」二字后按类型加「荣获/被评为」前缀。
+    若开头已有完整日期，把前缀加在日期之后，让日期保持在最前面。"""
     t = str(item).strip().replace("证书", "").strip()
+    m = _LEAD_DATE_RE.match(t)
+    if m:
+        date, rest = m.group(1), m.group(2).strip()
+        return date + cert_sentence_prefix(rest) + rest
     return cert_sentence_prefix(t) + t
 
 
+# 这些结尾的条目本身是「工作/会议/讲座/考核/训练」等，不适合再加「活动」
+_PRAISE_NO_SUFFIX = ("工作", "会", "讲座", "考核", "参与", "训练", "表演")
+
+
+def _praise_body(rest):
+    """构造「参与」后面的正文：去掉源数据已有的「参与」前缀（避免重复），
+    再按语义决定是否在结尾补「活动」。"""
+    b = str(rest).strip()
+    if b.startswith("参与"):
+        b = b[2:].strip()
+    if "活动" in b or b.endswith(_PRAISE_NO_SUFFIX):
+        return b
+    return b + "活动"
+
+
 def to_praise_sentence(item):
-    """表扬信条目转句子：统一加「参与」前缀。"""
-    return "参与" + str(item).strip()
+    """表扬信条目转句子：去掉结尾「表扬信/表演信」，加「参与」前缀，
+    并按语义把「表扬信」替换为「活动」（不适合加活动的不加）。
+    开头已有完整日期时，日期保持在最前面。"""
+    t = str(item).strip()
+    for tail in ("表扬信", "表演信"):
+        if t.endswith(tail):
+            t = t[:-len(tail)].strip()
+            break
+    m = _LEAD_DATE_RE.match(t)
+    if m:
+        date, rest = m.group(1), m.group(2).strip()
+        return date + "参与" + _praise_body(rest)
+    return "参与" + _praise_body(t)
 
 
 def _sentence_lines(value, conv):
