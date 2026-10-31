@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 德育分签字表生成器
 - 不写死文件名 / 工作表 / 表头名 / 列位置 / 人数，通用适配。
@@ -47,7 +47,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.12.0"
+APP_VERSION = "v1.12.1"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -3294,7 +3294,7 @@ class App(TkinterDnD.Tk):
             "提升工作效率、减轻事务负担。由于程序存在偶发出错的可能性，"
             "请各位资信管理员在使用工具导出、生成的结果时务必仔细核验，"
             "做好复核工作。若在使用过程中遇到程序报错、数据异常或其他相关问题，"
-            "可联系25级王子瑶反馈，联系邮箱：yaowzxi@163.com。"
+            "可通过邮箱 yaowzxi@163.com 反馈。"
         )
         box = tk.Frame(body, bg=CARD_BG, highlightthickness=1,
                        highlightbackground=CARD_BORDER)
