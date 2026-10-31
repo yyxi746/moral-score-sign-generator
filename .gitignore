@@ -4,6 +4,10 @@ build/
 *.exe
 *.spec
 
+# 打包好的交付文件夹（80MB 运行时目录，不进仓库）
+德育分签字表生成器/
+*onedir.zip
+
 #python缓存
 __pycache__/
 *.pyc

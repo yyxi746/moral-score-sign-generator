@@ -45,7 +45,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.11.5"
+APP_VERSION = "v1.11.6"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -2941,6 +2941,13 @@ class App(TkinterDnD.Tk):
                  wraplength=self._scaled_px(510),
                  padx=self._scaled_px(12)).pack(anchor="w",
                                                 pady=self._scaled_px(8))
+
+        tk.Label(body,
+                 text="首次运行若提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可；"
+                      "程序未做数字签名，属正常现象。",
+                 bg=CARD_BG, fg=MUTED, font=(UI_FONT, 9), justify="left",
+                 anchor="w", wraplength=self._scaled_px(510)).pack(
+            anchor="w", pady=(0, self._scaled_px(8)))
 
         tk.Label(body, text="Python · tkinter · openpyxl · python-docx",
                  bg=CARD_BG, fg=MUTED, font=(UI_FONT, 9)).pack(anchor="w")

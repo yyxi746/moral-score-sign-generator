@@ -6,7 +6,13 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 
 ## 下载
 
-进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载最新版 `zixin-nxy.exe`，双击即可使用，无需安装 Python。
+进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载 `zixin-nxy-onedir.zip`：
+
+解压后得到 `zixin-nxy` 文件夹，双击里面的 `zixin-nxy.exe` 即可使用，无需安装 Python。
+
+> 📌 **只用目录版**：`zixin-nxy.exe` 必须和同级 `_internal` 文件夹放在一起，不要单独把 exe 拖走；换位置请整个文件夹一起挪。目录版启动不需要解压到临时目录，因此在任何路径下都能运行，也比单文件版启动更快、被杀软误判更少。
+>
+> ⚠️ **首次运行提示「Windows 已保护你的电脑」是正常的**：程序没有购买数字签名证书，Windows SmartScreen 对「无签名 + 无下载量」的新程序一律先拦截。点弹窗里的 **「更多信息」→「仍要运行」** 即可，之后同一文件不会再拦。请只从上述 Releases 页面下载，并核对页面公布的 SHA256。
 
 ## ✨ 功能
 
@@ -31,6 +37,7 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 19. **v1.11.0 界面改版**：整体改为「深色侧边导航 + 右侧内容区」，统一绿色主题（微软雅黑、白卡片、绿色主按钮与表头）；修复高 DPI 缩放导致的字体模糊，四个页签统一窗口尺寸、打开即居中；关于窗与提取完成弹窗重做为绿色横幅 + 分区卡片、居中显示；从 Excel 导入名单时自动剔除「班级：xx」「姓名」等表头标签
 20. **v1.11.1 弹窗适配**：首次运行的「欢迎使用」模板引导弹窗重做为绿色横幅 + 说明卡片，与关于窗、完成弹窗风格统一，居中显示，点「开始选择模板」后继续
 21. **v1.11.5 日期补年份与表扬信改版**：①证书/表扬信提取时，条目里的简短日期（`3.6`、`7.3`、`8月`、`五月` 等）按来源学期自动补全年份，完整日期放到最前面（中文格式，如「2026年3月6日」），阿拉伯数字与中文数字月份都识别，中间的月份也会提取前置；完全没有日期依据的条目保持原样；②句子形式转换后日期保持在最前面，如「2026年3月荣获…」「2026年7月5日参与…」；③表扬信句子去掉结尾「表扬信」，按语义替换为「活动」（如宿舍搬迁活动、培训活动、材料收集活动），不适合加活动的（会议、讲座、考核、工作、训练等）不加，并修复重复「参与」前缀
+22. **v1.11.6 分发体验**：①exe 写入版本信息资源（FileVersion / 产品名 / 发布者），文件属性页不再空白；②关于窗新增 SmartScreen 提示，说明「Windows 已保护你的电脑」的应对方法；③打包脚本补上 `--version-file`，并提供目录版（onedir）打包方式，目录版启动更快、杀软误报更少
 
 ## 📦 环境依赖
 
@@ -43,6 +50,16 @@ python main.py
 
 ## 打包 exe
 
+依赖已写入 `requirements.txt`（含 pyinstaller）。
+
+**只打目录版**，不要再打单文件版（`--onefile` 每次启动都要把自身解压到 `%TEMP%`，在部分电脑/目录下会直接报 `Could not create temporary directory!` 打不开）：
+
 ```bash
-pyinstaller --onefile --noconsole --name zixin-nxy --icon app.ico --add-data "app.ico;." --collect-all tkinterdnd2 main.py
+pyinstaller --onedir --noconsole --name zixin-nxy --icon app.ico \
+  --version-file version_info.txt --add-data "app.ico;." \
+  --collect-all tkinterdnd2 main.py
 ```
+
+产物在 `dist/zixin-nxy/`，把整个文件夹压成 `zixin-nxy-onedir.zip` 分发。
+
+版本号改两处：`main.py` 里的 `APP_VERSION` 与 `version_info.txt` 里的 `filevers/prodvers`。
