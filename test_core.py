@@ -17,6 +17,9 @@ import traceback
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import json
+import time
+
 import openpyxl
 from docx import Document
 
@@ -24,6 +27,11 @@ import main
 
 TMP = None
 RESULTS = []
+SKIPPED = []
+
+
+class Skip(Exception):
+    """当前环境跑不了的检查（如没有图形界面）。"""
 
 
 # ---------------------------------------------------------------- 测试框架
@@ -33,6 +41,9 @@ def check(name, func):
         func()
         RESULTS.append((name, True, ""))
         print(f"  [OK]   {name}")
+    except Skip as exc:
+        SKIPPED.append(name)
+        print(f"  [SKIP] {name}（{exc}）")
     except Exception as exc:
         RESULTS.append((name, False, str(exc)))
         print(f"  [FAIL] {name}")
@@ -312,6 +323,63 @@ def test_process_one_excel_month_filter():
     eq(rows[2].cells[2].text, "2", "张三只统计 3-4月 后的表扬信条数")
 
 
+# ---------------------------------------------------------------- 界面（线程调度）
+def test_batch_threads():
+    """批量生成走后台线程 + 结果队列：两个同名源文件应各自成功并自动错开文件名。
+    需要图形环境，没有 Tk 时跳过。"""
+    try:
+        app = main.App()
+    except Exception as exc:
+        raise Skip(f"无图形环境：{exc}")
+
+    cfg_path = os.path.join(TMP, "gui_config.json")
+    orig_cfg = main.config_file
+    orig_mb = (main.messagebox.askyesno, main.messagebox.showwarning,
+               main.messagebox.showinfo)
+    main.config_file = lambda: cfg_path
+    main.messagebox.askyesno = lambda *a, **k: True
+    main.messagebox.showwarning = lambda *a, **k: None
+    main.messagebox.showinfo = lambda *a, **k: None
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"template_path": os.path.join(TMP, "template.docx"),
+                       "about_seen": True}, f, ensure_ascii=False)
+        app.withdraw()
+        app._batch_finish = lambda cancelled=False: None  # 不弹完成窗
+        outdir = os.path.join(TMP, "batch")
+        os.makedirs(outdir, exist_ok=True)
+        app.template_path.set(os.path.join(TMP, "template.docx"))
+        app.output_dir.set(outdir)
+
+        xlsx = os.path.join(TMP, "农学23-1班2025-2026学年第2学期德育分统计表.xlsx")
+        app.batch_items = {}
+        app.batch_info = {}
+        for _ in range(2):  # 故意加同一个文件两次，验证同名自动错开
+            item = app.batch_tree.insert(
+                "", "end", values=(os.path.basename(xlsx), "", ""))
+            app.batch_items[item] = xlsx
+            app.batch_info[item] = {"students": [1], "problems": []}
+
+        app.batch_generate()
+        t0 = time.time()
+        while time.time() - t0 < 60:
+            app.update()
+            time.sleep(0.05)
+            if not getattr(app, "_gen_active", True):
+                break
+        eq(app._gen_results["ok"], 2, "批量成功数")
+        eq(app._gen_results["fail"], 0, "批量失败数")
+        eq(len(os.listdir(outdir)), 2, "输出文件数（同名应自动加 _2）")
+    finally:
+        main.config_file = orig_cfg
+        (main.messagebox.askyesno, main.messagebox.showwarning,
+         main.messagebox.showinfo) = orig_mb
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- 主流程
 def main_entry():
     global TMP
@@ -350,9 +418,13 @@ def main_entry():
         print("\n=== 配置 ===")
         check("配置读写往返", test_config_roundtrip)
 
+        print("\n=== 界面 / 线程调度（无图形环境时跳过）===")
+        check("批量生成后台线程 + 同名自动错开", test_batch_threads)
+
         passed = sum(1 for _, ok, _ in RESULTS if ok)
         total = len(RESULTS)
-        print(f"\n{passed}/{total} 项通过")
+        skip_txt = f"，跳过 {len(SKIPPED)} 项" if SKIPPED else ""
+        print(f"\n{passed}/{total} 项通过{skip_txt}")
         if passed == total:
             print("ALL PASS")
             return 0

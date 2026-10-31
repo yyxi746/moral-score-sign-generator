@@ -6,11 +6,9 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 
 ## 下载
 
-进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载 `zixin-nxy-onedir.zip`：
+进入 [Releases 页面](https://github.com/yyxi746/moral-score-sign-generator/releases)，下载最新版 `zixin-nxy.exe`，双击即可使用，无需安装 Python。
 
-解压后得到 `zixin-nxy` 文件夹，双击里面的 `zixin-nxy.exe` 即可使用，无需安装 Python。
-
-> 📌 **只用目录版**：`zixin-nxy.exe` 必须和同级 `_internal` 文件夹放在一起，不要单独把 exe 拖走；换位置请整个文件夹一起挪。目录版启动不需要解压到临时目录，因此在任何路径下都能运行，也比单文件版启动更快、被杀软误判更少。
+> 🧰 **如果提示 `Could not create temporary directory!`**：单文件版启动时要先把自身解压到系统临时目录，个别电脑上这一步会被安全软件拦住。这时改下载同一版本的 `zixin-nxy-onedir.zip`，解压后运行 `zixin-nxy\zixin-nxy.exe`（目录版不写临时目录，放在任何位置都能跑）。注意 exe 必须和同级 `_internal` 文件夹待在一起，换位置请整个文件夹一起挪。
 >
 > ⚠️ **首次运行提示「Windows 已保护你的电脑」是正常的**：程序没有购买数字签名证书，Windows SmartScreen 对「无签名 + 无下载量」的新程序一律先拦截。点弹窗里的 **「更多信息」→「仍要运行」** 即可，之后同一文件不会再拦。请只从上述 Releases 页面下载，并核对页面公布的 SHA256。
 
@@ -39,7 +37,7 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 21. **v1.11.5 日期补年份与表扬信改版**：①证书/表扬信提取时，条目里的简短日期（`3.6`、`7.3`、`8月`、`五月` 等）按来源学期自动补全年份，完整日期放到最前面（中文格式，如「2026年3月6日」），阿拉伯数字与中文数字月份都识别，中间的月份也会提取前置；完全没有日期依据的条目保持原样；②句子形式转换后日期保持在最前面，如「2026年3月荣获…」「2026年7月5日参与…」；③表扬信句子去掉结尾「表扬信」，按语义替换为「活动」（如宿舍搬迁活动、培训活动、材料收集活动），不适合加活动的（会议、讲座、考核、工作、训练等）不加，并修复重复「参与」前缀
 22. **v1.11.6 分发体验**：①exe 写入版本信息资源（FileVersion / 产品名 / 发布者），文件属性页不再空白；②关于窗新增 SmartScreen 提示，说明「Windows 已保护你的电脑」的应对方法；③打包脚本补上 `--version-file`，并提供目录版（onedir）打包方式，目录版启动更快、杀软误报更少
 23. **v1.11.7 修复与体验**：①句式转换保留「来源学期」列，不再丢数据；②证书措辞优化：以「参与」开头的成果不再加「荣获」，志愿者/干部等身份类改用「被评为」，且只去掉结尾的「证书」二字；③配置读写失败不再静默丢失，写入 error.log 并在状态栏提示；④提取名单按归一化姓名自动去重（「张三」与「张三（男）」视为同一人）；⑤全部提示改为绿色主题弹窗，统一居中于主窗口，批量完成窗同步改版；⑥提取页新增进度条，逐表显示「正在提取 2/5：xxx.xlsx」；⑦批量生成改为后台线程 + 结果队列，生成时界面不再卡死，取消可立即生效；⑧按月份段生成时只读一次工作簿，批量速度提升；⑨批量完成后双击已生成的行可直接打开 Word，状态栏与完成弹窗显示耗时；⑩提取/句式页记住输出位置，同名文件自动另存为 `_1`、`_2`，不再覆盖上次结果
-24. **v1.12.0 自动化测试**：重写 `test_core.py` 为**自包含**回归测试，样本 Excel 与 Word 模板在临时目录现场生成，不依赖任何本机文件，任何人 `python test_core.py` 都能跑；覆盖 17 项检查——表头识别、月份分组、标题班级识别、学生提取（合计行排除）、分数校验（空分数/负分）、跨月份证书表扬信提取、日期补年份、证书与表扬信措辞、名单去重、结果写出、句式转换保留来源学期、同名另存、模板校验、Word 灌入、端到端生成、按月份段生成、配置读写往返
+24. **v1.12.0 自动化测试**：重写 `test_core.py` 为**自包含**回归测试，样本 Excel 与 Word 模板在临时目录现场生成，不依赖任何本机文件，任何人 `python test_core.py` 都能跑；覆盖 18 项检查——表头识别、月份分组、标题班级识别、学生提取（合计行排除）、分数校验（空分数/负分）、跨月份证书表扬信提取、日期补年份、证书与表扬信措辞、名单去重、结果写出、句式转换保留来源学期、同名另存、模板校验、Word 灌入、端到端生成、按月份段生成、配置读写往返
 
 ## 🧪 测试
 
@@ -47,7 +45,7 @@ Excel 文件名、工作表、表头名称、列位置不固定，程序自动�
 python test_core.py
 ```
 
-全部通过时打印 `17/17 项通过` 与 `ALL PASS`，退出码 0；有失败会列出具体项目并返回 1，方便改完立刻验证有没有改坏。
+全部通过时打印 `18/18 项通过` 与 `ALL PASS`，退出码 0；有失败会列出具体项目并返回 1，方便改完立刻验证有没有改坏。
 
 ## 📦 环境依赖
 
@@ -60,16 +58,20 @@ python main.py
 
 ## 打包 exe
 
-依赖已写入 `requirements.txt`（含 pyinstaller）。
-
-**只打目录版**，不要再打单文件版（`--onefile` 每次启动都要把自身解压到 `%TEMP%`，在部分电脑/目录下会直接报 `Could not create temporary directory!` 打不开）：
+依赖已写入 `requirements.txt`（含 pyinstaller）。两个版本都要打，一起发：
 
 ```bash
+# 1) 主推：单文件版 → dist/zixin-nxy.exe（双击即用）
+pyinstaller --onefile --noconsole --name zixin-nxy --icon app.ico \
+  --version-file version_info.txt --add-data "app.ico;." \
+  --collect-all tkinterdnd2 main.py
+
+# 2) 兜底：目录版 → dist/zixin-nxy/，整个文件夹压成 zixin-nxy-onedir.zip
 pyinstaller --onedir --noconsole --name zixin-nxy --icon app.ico \
   --version-file version_info.txt --add-data "app.ico;." \
   --collect-all tkinterdnd2 main.py
 ```
 
-产物在 `dist/zixin-nxy/`，把整个文件夹压成 `zixin-nxy-onedir.zip` 分发。
+单文件版启动时要把自身解压到 `%TEMP%`，个别电脑上会被安全软件拦住并报 `Could not create temporary directory!`，所以目录版作为兜底一起发；两次打包别用同一个 `--distpath`，否则后一次的产物会盖掉前一次的。
 
 版本号改两处：`main.py` 里的 `APP_VERSION` 与 `version_info.txt` 里的 `filevers/prodvers`。
