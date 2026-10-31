@@ -3,8 +3,8 @@
 # 同时给 SmartScreen / 杀软一个可信的发布者与版本线索。
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 11, 7, 0),
-        prodvers=(1, 11, 7, 0),
+        filevers=(1, 12, 0, 0),
+        prodvers=(1, 12, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -20,12 +20,12 @@ VSVersionInfo(
                     [
                         StringStruct("CompanyName", "农院资信"),
                         StringStruct("FileDescription", "德育分签字表生成器"),
-                        StringStruct("FileVersion", "1.11.7"),
+                        StringStruct("FileVersion", "1.12.0"),
                         StringStruct("InternalName", "zixin-nxy"),
                         StringStruct("LegalCopyright", "Copyright (C) 2026 农院资信"),
                         StringStruct("OriginalFilename", "zixin-nxy.exe"),
                         StringStruct("ProductName", "德育分签字表生成器"),
-                        StringStruct("ProductVersion", "1.11.7"),
+                        StringStruct("ProductVersion", "1.12.0"),
                     ],
                 )
             ]

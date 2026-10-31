@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 德育分签字表生成器
 - 不写死文件名 / 工作表 / 表头名 / 列位置 / 人数，通用适配。
@@ -47,7 +47,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.11.7"
+APP_VERSION = "v1.12.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -751,6 +751,24 @@ def normalize_name(s):
     s = re.sub(r"[（(].*?[)）]", "", s)
     s = re.sub(r"\s+", "", s)
     return s
+
+
+def parse_name_text(raw):
+    """把名单文本按空白/逗号/顿号/分号切分，并按「归一化姓名」去重
+    （「张三」与「张三（男）」视为同一人，保留第一次出现的位置）。
+    返回 (names, dup_count)：dup_count 为被忽略的重复个数。"""
+    out, seen, dup = [], set(), 0
+    for p in re.split(r"[\s,，、;；\n\r\t]+", raw or ""):
+        p = p.strip()
+        if not p:
+            continue
+        key = normalize_name(p) or p
+        if key in seen:
+            dup += 1
+            continue
+        seen.add(key)
+        out.append(p)
+    return out, dup
 
 
 def extract_semester(filename):
@@ -2849,22 +2867,10 @@ class App(TkinterDnD.Tk):
         self._ext_add_files(self._parse_drop_paths(event.data))
 
     def _parse_name_list(self):
-        """解析名单：按空白/逗号/顿号切分，并按「归一化姓名」去重
-        （「张三」和「张三（男）」视为同一人），重复个数记在 _name_dups。"""
-        raw = self.ext_name_text.get("1.0", "end")
-        out, seen, dup = [], set(), 0
-        for p in re.split(r"[\s,，、;；\n\r\t]+", raw):
-            p = p.strip()
-            if not p:
-                continue
-            key = normalize_name(p) or p
-            if key in seen:
-                dup += 1
-                continue
-            seen.add(key)
-            out.append(p)
+        """解析界面上的名单文本，重复个数记在 _name_dups（供完成弹窗显示）。"""
+        names, dup = parse_name_text(self.ext_name_text.get("1.0", "end"))
         self._name_dups = dup
-        return out
+        return names
 
     def ext_browse_output(self):
         first_dir = ""
