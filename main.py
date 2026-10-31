@@ -15,7 +15,9 @@ import json
 import copy
 import ctypes
 from ctypes import wintypes
+import queue
 import threading
+import time
 import traceback
 import datetime
 import webbrowser
@@ -45,7 +47,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.11.6"
+APP_VERSION = "v1.11.7"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -129,26 +131,33 @@ def config_file():
     d = app_config_dir()
     try:
         os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as ex:
+        quiet_log("创建配置目录", ex)
     return os.path.join(d, CONFIG_NAME)
 
 
 def load_config():
+    """读配置。文件不存在时返回空字典；读取失败写 error.log，不再静默吞掉。"""
     try:
         with open(config_file(), "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as ex:
+        log_error(ex)
         return {}
 
 
 def save_config(cfg):
+    """保存配置。成功返回 True；失败写 error.log 并返回 False（供界面提示）。"""
     try:
         with open(config_file(), "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        return True
+    except Exception as ex:
+        log_error(ex)
+        return False
 
 
 # ============================ Excel 读取与识别 ============================
@@ -390,6 +399,17 @@ def unique_output_path(path, reserved):
     return f"{base}_{i}{ext}"
 
 
+def unique_path_on_disk(path):
+    """目标文件已存在时，返回一个没被占用的 _1/_2 名字，避免覆盖上一次的结果。"""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while os.path.exists(f"{base}_{i}{ext}"):
+        i += 1
+    return f"{base}_{i}{ext}"
+
+
 def ensure_writable(path):
     """输出文件已存在且被占用（如正在 Word 中打开）时给出友好提示。"""
     if os.path.exists(path):
@@ -464,8 +484,8 @@ def set_repeat_header(table):
                 el = OxmlElement("w:tblHeader")
                 el.set(qn("w:val"), "true")
                 trPr.append(el)
-    except Exception:
-        pass
+    except Exception as ex:
+        quiet_log("设置表头跨页重复", ex)
 
 
 def fill_word(template_path, output_path_, students, title, class_name):
@@ -512,6 +532,19 @@ def check_template_structure(path):
     return True, "模板结构正常。"
 
 
+def quiet_log(where, exc=None):
+    """记录「非致命但值得留痕」的失败：只追加一行，供事后排查，不打扰用户。"""
+    try:
+        d = app_config_dir()
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "error.log"), "a", encoding="utf-8") as f:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            name = type(exc).__name__ if exc is not None else "失败"
+            f.write(f"[{ts}] {where}: {name}: {exc}\n")
+    except Exception:
+        pass
+
+
 def log_error(exc):
     """把异常 traceback 写入 %APPDATA%\\德育分签字表生成器\\error.log，带时间戳。"""
     try:
@@ -537,8 +570,9 @@ def collect_excels(folder):
     return sorted(out)
 
 
-def analyze_excel_auto(path):
+def analyze_excel_auto(path, selected_months=None):
     """对单个文件自动识别（第一个工作表、全部月份组）。
+    selected_months：只统计这些月份段（集合）；None = 全部月份段。
     返回 dict：sheet/title/class/students；识别失败抛异常。"""
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
@@ -553,7 +587,15 @@ def analyze_excel_auto(path):
         if not score_col:
             raise ValueError("未识别到德育分(总分)列。")
         month_groups = group_praise_by_month(ws, praise_cols)
-        students = extract_students(ws, name_col, score_col, praise_cols)
+        # 只统计选中的月份段时，在同一次打开里算好，避免二次读工作簿
+        if selected_months is not None:
+            sel_cols = []
+            for month, cols in month_groups:
+                if month in selected_months:
+                    sel_cols.extend(cols)
+            students = extract_students(ws, name_col, score_col, sel_cols)
+        else:
+            students = extract_students(ws, name_col, score_col, praise_cols)
         if not students:
             raise ValueError("未识别到学生数据。")
         return {"sheet": sheet,
@@ -571,26 +613,12 @@ def process_one_excel(path, template_path_, output_dir, selected_months=None,
     selected_months：只统计这些月份段（集合）；None = 全部月份段。
     overrides：手工修正的标题/班级。
     out_path：显式指定输出路径（批量防同名覆盖时使用）。"""
-    info = analyze_excel_auto(path)
+    info = analyze_excel_auto(path, selected_months)
     out = out_path or compute_output_path(path, output_dir)
     d = os.path.dirname(out)
     if d:
         os.makedirs(d, exist_ok=True)
     students = info["students"]
-    if selected_months is not None:
-        wb = openpyxl.load_workbook(path, data_only=True)
-        try:
-            ws = wb[info["sheet"]]
-            headers = scan_headers(ws)
-            name_col, score_col, praise_cols = detect_columns(headers)
-            groups = group_praise_by_month(ws, praise_cols)
-            sel_cols = []
-            for month, cols in groups:
-                if month in selected_months:
-                    sel_cols.extend(cols)
-            students = extract_students(ws, name_col, score_col, sel_cols)
-        finally:
-            wb.close()
     title = info["title"]
     cls = info["class"]
     if overrides:
@@ -813,15 +841,17 @@ def add_year_to_date(text, semester_str):
     return s
 
 
-def collect_person_rows(paths, wanted_names):
+def collect_person_rows(paths, wanted_names, on_progress=None):
     """按名单在多个源文件中提取（姓名模糊匹配：自动去空格、去括号后缀）。
     rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
     同名在多个文件出现时，每个文件各自一行，并在末尾追加一行「姓名（合计）」汇总。
+    on_progress(i, total, 文件名)：每读完一个源表回调一次，用于界面显示进度。
     返回 (rows, missing, multi_names)：
       missing = 在所有源表中都找不到的姓名；
       multi_names = 在多个源表中出现、已加合计行的姓名。"""
     file_data = []
-    for p in paths:
+    total = len(paths)
+    for idx, p in enumerate(paths, 1):
         try:
             data = extract_persons_from_workbook(p)
         except Exception:
@@ -836,6 +866,11 @@ def collect_person_rows(paths, wanted_names):
                     praises = [add_year_to_date(x, sem) for x in v[1]]
                     norm_data[nk] = (certs, praises)
             file_data.append((os.path.basename(p), norm_data))
+        if on_progress:
+            try:
+                on_progress(idx, total, os.path.basename(p))
+            except Exception:
+                pass
     rows, missing, multi_names = [], [], []
     for name in wanted_names:
         nname = normalize_name(name)
@@ -913,14 +948,17 @@ _CERT_HONOR_KEYS = ("三好学生", "三号学生", "好学生", "号学生",
                     "好室友", "好舍长", "标兵", "优秀", "先进",
                     "最美", "百佳", "学霸", "示范", "之星", "积极分子",
                     "称号", "荣誉", "星级", "好人")
+# 身份/职务类：去掉「证书」后仍是称谓（如「省志愿者」），用「被评为」
+_CERT_ROLE_KEYS = ("志愿者", "干部", "干事", "成员", "委员", "队长", "负责人")
 
 
 def cert_sentence_prefix(item):
-    """证书条目前缀：获奖/名次类→「荣获」；荣誉称号类→「被评为」；
+    """证书条目前缀：获奖/名次类→「荣获」；荣誉称号/身份类→「被评为」；
     无法判断默认「荣获」。含「奖/名次/竞赛/比赛」优先判为荣获。"""
     if _CERT_RANK_RE.search(item) or any(k in item for k in _CERT_WIN_KEYS):
         return "荣获"
-    if any(k in item for k in _CERT_HONOR_KEYS):
+    if (any(k in item for k in _CERT_HONOR_KEYS)
+            or any(k in item for k in _CERT_ROLE_KEYS)):
         return "被评为"
     return "荣获"
 
@@ -930,13 +968,21 @@ _LEAD_DATE_RE = re.compile(r"^(\d{4}年\d{1,2}月(?:\d{1,2}日)?)(.*)$")
 
 
 def to_cert_sentence(item):
-    """证书条目转句子：去掉「证书」二字后按类型加「荣获/被评为」前缀。
-    若开头已有完整日期，把前缀加在日期之后，让日期保持在最前面。"""
-    t = str(item).strip().replace("证书", "").strip()
+    """证书条目转句子：
+    - 只去掉结尾的「证书」二字（不再删正文里的「证书」）；
+    - 以「参与」开头的条目本身是成果陈述（如「参与发表论文」），不加前缀；
+    - 其余按类型加「荣获 / 被评为」，开头已有完整日期时日期保持在最前。"""
+    t = str(item).strip()
+    while t.endswith("证书"):
+        t = t[:-2].strip()
     m = _LEAD_DATE_RE.match(t)
     if m:
         date, rest = m.group(1), m.group(2).strip()
+        if rest.startswith("参与"):
+            return date + rest
         return date + cert_sentence_prefix(rest) + rest
+    if t.startswith("参与"):
+        return t
     return cert_sentence_prefix(t) + t
 
 
@@ -997,7 +1043,10 @@ def convert_result_to_sentences(in_path, out_path):
             data_count += 1
         certs = _sentence_lines(ws.cell(r, 2).value, to_cert_sentence)
         praises = _sentence_lines(ws.cell(r, 3).value, to_praise_sentence)
-        rows.append((name, "\n".join(certs), "\n".join(praises), "", is_total))
+        # 保留「来源学期」列，避免转句子后信息丢失
+        sem = ws.cell(r, 4).value if ws.max_column >= 4 else None
+        sem = str(sem).strip() if sem is not None else ""
+        rows.append((name, "\n".join(certs), "\n".join(praises), sem, is_total))
     wb.close()
     write_person_result_xlsx(rows, out_path)
     return data_count
@@ -1009,15 +1058,187 @@ def register_drop_recursive(widget, handler):
     try:
         widget.drop_target_register(DND_FILES)
         widget.dnd_bind("<<Drop>>", handler)
-    except Exception:
-        pass
+    except Exception as ex:
+        quiet_log("注册文件拖放", ex)
     for child in widget.winfo_children():
         register_drop_recursive(child, handler)
+
+
+# ============================ 主题弹窗 ============================
+# 把 tkinter 自带的灰底弹窗换成「绿色横幅 + 白卡片」样式，并居中于主窗口。
+_DLG_APP = {"app": None}      # 当前主窗口，用于居中
+_DLG_LAST = {"top": None}     # 最近一次弹窗，便于排查
+_DLG_ICON = {"info": ("✓", "#2f8f5b"), "warning": ("!", "#d98324"),
+             "error": ("✕", "#c0392b"), "ask": ("?", "#2f8f5b")}
+
+
+def _parse_geometry(g):
+    """解析 Tk 的 '480x229+527+328' 形式，返回 (x, y)；失败返回 (None, None)。"""
+    try:
+        pos = g.split("+")
+        if len(pos) >= 3:
+            return int(pos[1]), int(pos[2])
+        neg = g.split("-")
+        if len(neg) >= 3:
+            return -int(neg[1]), -int(neg[2])
+    except Exception:
+        pass
+    return None, None
+
+
+def _center_top_on(parent, top):
+    """把 top 居中到 parent（主窗口）上，并兜底限制在屏幕内。
+    任务栏标题栏会造成几像素偏差，这里用客户区实测值反推外框位置。"""
+    try:
+        parent.update_idletasks()
+        top.update_idletasks()
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        tw, th = top.winfo_width(), top.winfo_height()
+        if tw <= 1 or th <= 1:
+            tw, th = top.winfo_reqwidth(), top.winfo_reqheight()
+        gx, gy = _parse_geometry(top.geometry())
+        dx = (top.winfo_rootx() - gx) if gx is not None else 0
+        dy = (top.winfo_rooty() - gy) if gy is not None else 0
+        want_x = px + (pw - tw) // 2
+        want_y = py + (ph - th) // 2
+        x, y = want_x - dx, want_y - dy
+        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+        x = max(0, min(x, sw - tw))
+        y = max(0, min(y, sh - th))
+        top.geometry(f"{tw}x{th}+{x}+{y}")
+    except Exception:
+        pass
+
+
+def themed_dialog(kind, title, message, buttons, parent=None):
+    """主题弹窗。buttons=[(文字, 返回值, 是否主按钮), ...]；返回被点按钮的值。"""
+    par = parent if parent is not None else _DLG_APP.get("app")
+    if par is None or not par.winfo_exists():
+        return None
+    top = tk.Toplevel(par)
+    top.withdraw()
+    top.title(title)
+    top.transient(par)
+    top.configure(bg=CARD_BG)
+    top.resizable(False, False)
+    s = getattr(par, "_s", 1.0)
+
+    def px(v):
+        return int(round(v * s))
+
+    icon, color = _DLG_ICON.get(kind, _DLG_ICON["info"])
+    banner = tk.Frame(top, bg=SIDEBAR_BG, height=px(70))
+    banner.pack(fill="x")
+    banner.pack_propagate(False)
+    box = tk.Frame(banner, bg="#ffffff", width=px(38), height=px(38))
+    box.pack(side="left", padx=px(16))
+    box.pack_propagate(False)
+    tk.Label(box, text=icon, bg="#ffffff", fg=color,
+             font=(UI_FONT, 17, "bold")).pack(expand=True)
+    tk.Label(banner, text=title, bg=SIDEBAR_BG, fg="#ffffff",
+             font=(UI_FONT, 13, "bold")).pack(side="left")
+
+    body = tk.Frame(top, bg=CARD_BG)
+    body.pack(fill="both", expand=True, padx=px(18), pady=px(14))
+    tk.Label(body, text=message, bg=CARD_BG, fg=INK, font=(UI_FONT, 10),
+             justify="left", anchor="w", wraplength=px(430)).pack(anchor="w")
+
+    result = {"v": None}
+
+    def close(v):
+        result["v"] = v
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        top.destroy()
+
+    btns = tk.Frame(body, bg=CARD_BG)
+    btns.pack(fill="x", pady=(px(14), 0))
+    for text, value, primary in reversed(buttons):
+        ttk.Button(btns, text=text,
+                   style="Accent.TButton" if primary else "TButton",
+                   command=lambda v=value: close(v)).pack(
+            side="right", padx=(px(8), 0))
+
+    top.protocol("WM_DELETE_WINDOW", lambda: close(buttons[-1][1]))
+    top.update_idletasks()
+    top.geometry(f"{px(480)}x{top.winfo_reqheight()}")
+    top.deiconify()
+    _center_top_on(par, top)
+    top.grab_set()
+    top.lift()
+    try:
+        top.focus_force()
+    except Exception:
+        pass
+    _DLG_LAST["top"] = top
+    par.wait_window(top)
+    return result["v"]
+
+
+def _install_themed_dialogs():
+    """把 messagebox 的常用函数替换成主题弹窗（无主窗口时退回原生实现）。"""
+    import tkinter.messagebox as _mb
+    originals = {n: getattr(_mb, n) for n in
+                 ("showinfo", "showwarning", "showerror",
+                  "askyesno", "askyesnocancel")}
+
+    def _fallback(name, title, message, kw):
+        fn = originals[name]
+        kw2 = {k: v for k, v in kw.items() if k != "parent"}
+        try:
+            return fn(title, message, **kw2)
+        except Exception:
+            return fn(title, message)
+
+    def showinfo(title=None, message="", **kw):
+        if _DLG_APP.get("app") is None:
+            return _fallback("showinfo", title, message, kw)
+        return themed_dialog("info", title or "提示", message,
+                             [("确定", "ok", True)], kw.get("parent"))
+
+    def showwarning(title=None, message="", **kw):
+        if _DLG_APP.get("app") is None:
+            return _fallback("showwarning", title, message, kw)
+        return themed_dialog("warning", title or "提示", message,
+                             [("确定", "ok", True)], kw.get("parent"))
+
+    def showerror(title=None, message="", **kw):
+        if _DLG_APP.get("app") is None:
+            return _fallback("showerror", title, message, kw)
+        return themed_dialog("error", title or "出错了", message,
+                             [("确定", "ok", True)], kw.get("parent"))
+
+    def askyesno(title=None, message="", **kw):
+        if _DLG_APP.get("app") is None:
+            return bool(_fallback("askyesno", title, message, kw))
+        return bool(themed_dialog("ask", title or "确认", message,
+                                  [("是", True, True), ("否", False, False)],
+                                  kw.get("parent")))
+
+    def askyesnocancel(title=None, message="", **kw):
+        if _DLG_APP.get("app") is None:
+            return _fallback("askyesnocancel", title, message, kw)
+        return themed_dialog("ask", title or "确认", message,
+                             [("是", True, True), ("否", False, False),
+                              ("取消", None, False)], kw.get("parent"))
+
+    _mb.showinfo = showinfo
+    _mb.showwarning = showwarning
+    _mb.showerror = showerror
+    _mb.askyesno = askyesno
+    _mb.askyesnocancel = askyesnocancel
+
+
+_install_themed_dialogs()
 
 
 class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
+        _DLG_APP["app"] = self
         self.title("德育分签字表生成器")
         # 按系统 DPI 缩放窗口，避免高 DPI 下开启感知后窗口偏小
         try:
@@ -1044,6 +1265,10 @@ class App(TkinterDnD.Tk):
         self.class_name = tk.StringVar()
         self.sheet_name = tk.StringVar()
         self.title_text = tk.StringVar()
+
+        # 提取 / 句式转换 的输出位置：记住上次选择，退出重进不丢
+        self.ext_output = tk.StringVar(value=cfg.get("ext_output", ""))
+        self.sent_output = tk.StringVar(value=cfg.get("sent_output", ""))
 
         self.wb = None
         self.headers = {}
@@ -1636,8 +1861,8 @@ class App(TkinterDnD.Tk):
         if self.wb is not None:
             try:
                 self.wb.close()
-            except Exception:
-                pass
+            except Exception as ex:
+                quiet_log("关闭工作簿", ex)
         self.wb = None
         self.headers = {}
         self.col_options = []
@@ -1702,8 +1927,8 @@ class App(TkinterDnD.Tk):
         if self.wb is not None:
             try:
                 self.wb.close()
-            except Exception:
-                pass
+            except Exception as ex:
+                quiet_log("关闭工作簿", ex)
         self.wb = openpyxl.load_workbook(path, data_only=True)
         names = list(self.wb.sheetnames)
         self.sheet_combo["values"] = names
@@ -1809,10 +2034,18 @@ class App(TkinterDnD.Tk):
             self._error(ex)
 
     def _save_cfg(self):
-        save_config({"template_path": self.template_path.get(),
-                     "output_dir": self.output_dir.get().strip(),
-                     "skip_version": getattr(self, "_skip_version", ""),
-                     "about_seen": bool(getattr(self, "_about_seen", False))})
+        ok = save_config({"template_path": self.template_path.get(),
+                          "output_dir": self.output_dir.get().strip(),
+                          "ext_output": self.ext_output.get().strip(),
+                          "sent_output": self.sent_output.get().strip(),
+                          "skip_version": getattr(self, "_skip_version", ""),
+                          "about_seen": bool(getattr(self, "_about_seen", False))})
+        if not ok:
+            try:
+                self.status.config(text="设置保存失败，详情见 error.log")
+            except Exception:
+                pass
+        return ok
 
     def _refresh_placeholder(self, tree, label):
         """列表为空时显示灰色占位提示，有文件时隐藏文字。"""
@@ -1981,6 +2214,15 @@ class App(TkinterDnD.Tk):
     def _batch_edit_row(self, event=None):
         item = self.batch_tree.identify_row(event.y) if event else None
         if not item or item not in self.batch_info:
+            return
+        # 已经生成过的行：双击直接打开生成的 Word；未生成则打开明细修改窗
+        detail = getattr(self, "_gen_detail", {}).get(item, {})
+        if detail.get("ok") and detail.get("out") and os.path.exists(detail["out"]):
+            try:
+                os.startfile(detail["out"])
+                self.status.config(text=f"已打开：{os.path.basename(detail['out'])}")
+            except Exception as ex:
+                self._error(ex)
             return
         info = self.batch_info[item]
         path = self.batch_items[item]
@@ -2230,6 +2472,10 @@ class App(TkinterDnD.Tk):
         self._gen_results = {"ok": 0, "fail": 0, "errors": []}
         self._gen_detail = {}  # item -> {ok, out, error, count}
         self._gen_cancel = False
+        self._gen_q = queue.Queue()  # 后台线程 -> 主线程的结果队列
+        self._gen_pending = 0        # 正在后台处理的文件数
+        self._gen_active = True
+        self._gen_t0 = time.time()   # 用于统计总耗时
         self.batch_bar["maximum"] = len(ready_items)
         self.batch_bar["value"] = 0
         self.batch_gen_btn.config(text="取消生成",
@@ -2243,81 +2489,160 @@ class App(TkinterDnD.Tk):
         self.status.config(text="正在取消，完成当前文件后停止…")
 
     def _pump_generate(self):
-        if getattr(self, "_gen_cancel", False):
+        """调度器：每次派一个文件给后台线程，主线程只刷新界面，生成时不再卡死。"""
+        if not getattr(self, "_gen_active", False):
+            return
+        # 收取后台线程已完成的结果
+        while True:
+            try:
+                item, path, cur, payload = self._gen_q.get_nowait()
+            except queue.Empty:
+                break
+            self._gen_pending = max(0, self._gen_pending - 1)
+            self._apply_gen_result(item, path, cur, payload)
+        if self._gen_cancel and self._gen_pending == 0:
+            self._gen_active = False
             self._batch_finish(cancelled=True)
             return
-        if not self._gen_queue:
+        if not self._gen_queue and self._gen_pending == 0:
+            self._gen_active = False
             self._batch_finish()
             return
-        item = self._gen_queue.pop(0)
-        path = self.batch_items[item]
-        cur = self.batch_tree.item(item, "values")
+        if (not self._gen_cancel) and self._gen_queue and self._gen_pending == 0:
+            item = self._gen_queue.pop(0)
+            path = self.batch_items[item]
+            cur = self.batch_tree.item(item, "values")
+            self.status.config(text=f"正在生成：{os.path.basename(path)}")
+            self._gen_pending = 1
+            # Tk 变量必须在主线程读取，先取好再交给后台线程
+            threading.Thread(
+                target=self._gen_worker_run,
+                args=(item, path, cur, self.template_path.get(),
+                      self.output_dir.get(), self._sel_months,
+                      self.batch_overrides.get(item),
+                      self._gen_path_map.get(item)),
+                daemon=True).start()
+        self.after(100, self._pump_generate)
+
+    def _gen_worker_run(self, item, path, cur, template, out_dir,
+                        sel_months, override, out_path):
+        """后台线程：只做耗时计算，不直接碰界面控件或 Tk 变量。"""
         try:
             out, n = process_one_excel(
-                path, self.template_path.get(), self.output_dir.get(),
-                self._sel_months, self.batch_overrides.get(item),
-                self._gen_path_map.get(item))
+                path, template, out_dir, sel_months, override, out_path)
+            payload = (True, out, n, "")
+        except Exception as ex:
+            payload = (False, "", 0, str(ex))
+        self._gen_q.put((item, path, cur, payload))
+
+    def _apply_gen_result(self, item, path, cur, payload):
+        """主线程：把单个文件的结果写回列表、进度条和状态栏。"""
+        ok, out, n, err = payload
+        # 生成期间用户可能把该行删掉了，界面更新要做存在性检查
+        exists = True
+        try:
+            exists = bool(self.batch_tree.exists(item))
+        except Exception:
+            exists = False
+        if ok:
             self._gen_results["ok"] += 1
             self._gen_detail[item] = {"ok": True, "out": out, "error": "", "count": n}
-            self.batch_tree.item(
-                item,
-                values=(cur[0], cur[1], cur[2], f"成功（{n}人）：{out}"),
-                tags=("ok",))
-        except Exception as ex:
+            if exists:
+                self.batch_tree.item(
+                    item,
+                    values=(cur[0], cur[1], cur[2], f"成功（{n}人）：{out}"),
+                    tags=("ok",))
+        else:
             self._gen_results["fail"] += 1
-            self._gen_results["errors"].append(
-                (os.path.basename(path), str(ex)))
-            self._gen_detail[item] = {"ok": False, "out": "", "error": str(ex), "count": 0}
-            self.batch_tree.item(
-                item,
-                values=(cur[0], cur[1], cur[2], f"失败：{ex}"),
-                tags=("error",))
+            self._gen_results["errors"].append((os.path.basename(path), err))
+            self._gen_detail[item] = {"ok": False, "out": "", "error": err, "count": 0}
+            if exists:
+                self.batch_tree.item(
+                    item,
+                    values=(cur[0], cur[1], cur[2], f"失败：{err}"),
+                    tags=("error",))
         self.batch_bar["value"] += 1
         self.status.config(
-            text=f"已处理 {int(self.batch_bar['value'])}/{self.batch_bar['maximum']}")
-        self.after(10, self._pump_generate)
+            text=f"已处理 {int(self.batch_bar['value'])}/{int(self.batch_bar['maximum'])}")
 
     def _batch_finish(self, cancelled=False):
         self.batch_gen_btn.config(text="开始批量生成",
                                   command=self.batch_generate,
                                   state="normal")
         r = self._gen_results
+        t0 = getattr(self, "_gen_t0", None)
+        dur = (time.time() - t0) if t0 else 0.0
+        time_txt = f"，耗时 {dur:.1f} 秒" if dur else ""
         if cancelled:
             done = r["ok"] + r["fail"]
             total = int(self.batch_bar["maximum"])
             self.status.config(
                 text=f"已取消：完成 {done}/{total}，成功 {r['ok']} 个，"
-                     f"失败 {r['fail']} 个")
+                     f"失败 {r['fail']} 个{time_txt}")
         else:
             self.status.config(
-                text=f"批量完成：成功 {r['ok']} 个，失败 {r['fail']} 个")
+                text=f"批量完成：成功 {r['ok']} 个，失败 {r['fail']} 个{time_txt}")
         top = tk.Toplevel(self)
+        top.withdraw()
         top.title("批量生成已取消" if cancelled else "批量生成完成")
         top.transient(self)
-        top.grab_set()
-        top.geometry(
-            f"440x280+{self.winfo_x()+200}+{self.winfo_y()+240}")
-        head = ("批量生成已取消，" if cancelled else "")
-        ttk.Label(top,
-                  text=f"{head}成功 {r['ok']} 个，失败 {r['fail']} 个",
-                  font=("Microsoft YaHei UI", 13, "bold")).pack(
-            pady=(20, 8))
+        top.configure(bg=CARD_BG)
+        top.resizable(False, False)
+        s = self._s
+
+        def px(v):
+            return int(round(v * s))
+
+        banner = tk.Frame(top, bg=SIDEBAR_BG, height=px(70))
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        box = tk.Frame(banner, bg="#ffffff", width=px(38), height=px(38))
+        box.pack(side="left", padx=px(16))
+        box.pack_propagate(False)
+        tk.Label(box, text="✓" if not cancelled else "!", bg="#ffffff",
+                 fg=PRIMARY if not cancelled else "#d98324",
+                 font=(UI_FONT, 17, "bold")).pack(expand=True)
+        tk.Label(banner, text="批量生成已取消" if cancelled else "批量生成完成",
+                 bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 13, "bold")).pack(side="left")
+
+        body = tk.Frame(top, bg=CARD_BG)
+        body.pack(fill="both", expand=True, padx=px(18), pady=px(14))
+        card = tk.Frame(body, bg=CARD_BG, highlightthickness=1,
+                        highlightbackground=CARD_BORDER)
+        card.pack(fill="x")
+        tk.Label(card, text=f"成功 {r['ok']} 个，失败 {r['fail']} 个{time_txt}",
+                 bg=CARD_BG, fg=INK, font=(UI_FONT, 12, "bold"),
+                 anchor="w", padx=px(12)).pack(fill="x", pady=(px(10), px(6)))
         if r["errors"]:
             msg = "\n".join(f"{n}：{e}" for n, e in r["errors"][:6])
-            ttk.Label(top, text=msg, foreground="#d23030",
-                      justify="left").pack(padx=20, pady=4)
-        btns = ttk.Frame(top)
-        btns.pack(pady=14)
-        ttk.Button(btns, text="导出汇总报告",
-                   command=lambda: (top.destroy(), self._export_batch_summary())
-                   ).pack(side="left", padx=8)
+            tk.Label(card, text=msg, bg=CARD_BG, fg="#c0392b", font=(UI_FONT, 9),
+                     justify="left", anchor="w", wraplength=px(420),
+                     padx=px(12)).pack(fill="x", pady=(0, px(10)))
+        if r["ok"]:
+            tk.Label(card, text="双击列表里已生成的行，可直接打开对应的 Word",
+                     bg=CARD_BG, fg=MUTED, font=(UI_FONT, 9), anchor="w",
+                     padx=px(12)).pack(fill="x", pady=(0, px(10)))
+
+        btns = tk.Frame(body, bg=CARD_BG)
+        btns.pack(fill="x", pady=(px(14), 0))
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
         out_dir = self.output_dir.get().strip()
         if out_dir:
             ttk.Button(
                 btns, text="打开输出目录",
                 command=lambda: (top.destroy(), os.startfile(out_dir))
-            ).pack(side="left", padx=8)
-        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="left", padx=8)
+            ).pack(side="right", padx=(0, px(8)))
+        ttk.Button(btns, text="导出汇总报告",
+                   command=lambda: (top.destroy(), self._export_batch_summary())
+                   ).pack(side="right", padx=(0, px(8)))
+
+        top.update_idletasks()
+        top.geometry(f"{px(480)}x{top.winfo_reqheight()}")
+        top.deiconify()
+        _center_top_on(self, top)
+        top.grab_set()
+        top.lift()
 
     def _export_batch_summary(self):
         """把本次批量生成结果导出为 Excel 汇总报告（文件名/工作表/人数/状态/输出路径/失败原因）。"""
@@ -2464,15 +2789,17 @@ class App(TkinterDnD.Tk):
         out_frame.pack(fill="x")
         ttk.Label(out_frame, text="输出文件：").grid(
             row=0, column=0, sticky="w", padx=4, pady=4)
-        self.ext_output = tk.StringVar()
         ttk.Entry(out_frame, textvariable=self.ext_output).grid(
             row=0, column=1, columnspan=2, sticky="we", padx=4)
         ttk.Button(out_frame, text="浏览…",
                    command=self.ext_browse_output).grid(row=0, column=3, padx=4)
-        ttk.Label(out_frame, text="（留空 = 生成到第一个源表所在目录）",
+        ttk.Label(out_frame, text="（必选：点「浏览…」指定保存位置，不会自动放到数据目录）",
                   foreground="gray").grid(
             row=1, column=1, columnspan=2, sticky="w", padx=4)
         out_frame.columnconfigure(1, weight=1)
+
+        self.ext_bar = ttk.Progressbar(outer, mode="determinate")
+        self.ext_bar.pack(fill="x", padx=4, pady=(8, 0))
 
         ttk.Button(outer, text="开始提取并生成 Excel",
                    command=self.ext_run).pack(pady=10)
@@ -2522,12 +2849,21 @@ class App(TkinterDnD.Tk):
         self._ext_add_files(self._parse_drop_paths(event.data))
 
     def _parse_name_list(self):
+        """解析名单：按空白/逗号/顿号切分，并按「归一化姓名」去重
+        （「张三」和「张三（男）」视为同一人），重复个数记在 _name_dups。"""
         raw = self.ext_name_text.get("1.0", "end")
-        out = []
+        out, seen, dup = [], set(), 0
         for p in re.split(r"[\s,，、;；\n\r\t]+", raw):
             p = p.strip()
-            if p and p not in out:
-                out.append(p)
+            if not p:
+                continue
+            key = normalize_name(p) or p
+            if key in seen:
+                dup += 1
+                continue
+            seen.add(key)
+            out.append(p)
+        self._name_dups = dup
         return out
 
     def ext_browse_output(self):
@@ -2542,6 +2878,7 @@ class App(TkinterDnD.Tk):
             filetypes=[("Excel 文件", "*.xlsx")])
         if path:
             self.ext_output.set(path)
+            self._save_cfg()
 
     def ext_import_names(self):
         """从 Excel 导入名单：自动识别姓名列，自动跳过「班级：xx」「姓名」
@@ -2601,13 +2938,27 @@ class App(TkinterDnD.Tk):
             return
         out = self.ext_output.get().strip()
         if not out:
-            out = os.path.join(os.path.dirname(paths[0]),
-                               "证书表扬信提取结果.xlsx")
-            self.ext_output.set(out)
+            messagebox.showwarning(
+                "请先选择输出位置",
+                "还没有选择输出文件，程序不会自动放到数据目录。\n\n"
+                "请点「浏览…」指定保存位置后再开始提取。")
+            return
+        # 已存在同名文件时自动另存为 _1/_2，不覆盖、不打扰
+        out = unique_path_on_disk(out)
+        self._save_cfg()
         self.status.config(text="正在提取，请稍候…")
+        self.ext_bar["maximum"] = max(1, len(paths))
+        self.ext_bar["value"] = 0
         self.update_idletasks()
+
+        def on_prog(i, total, name):
+            self.ext_bar["value"] = i
+            self.status.config(text=f"正在提取 {i}/{total}：{name}")
+            self.update_idletasks()
+
         try:
-            rows, missing, multi = collect_person_rows(paths, names)
+            rows, missing, multi = collect_person_rows(paths, names, on_prog)
+            self.ext_bar["value"] = 0
             if not rows:
                 messagebox.showwarning(
                     "提示", "名单中的人员在所有源表中均未找到，请核对名单。")
@@ -2681,13 +3032,12 @@ class App(TkinterDnD.Tk):
         out_frame.pack(fill="x")
         ttk.Label(out_frame, text="输出目录：").grid(
             row=0, column=0, sticky="w", padx=4, pady=4)
-        self.sent_output = tk.StringVar()
         ttk.Entry(out_frame, textvariable=self.sent_output).grid(
             row=0, column=1, columnspan=2, sticky="we", padx=4)
         ttk.Button(out_frame, text="浏览…",
                    command=self.sent_browse_output).grid(row=0, column=3, padx=4)
         ttk.Label(out_frame,
-                  text="（留空 = 各文件生成到自身所在目录，文件名自动加“_句式”）",
+                  text="（必选：点「浏览…」指定输出目录，文件名自动加“_句式”）",
                   foreground="gray").grid(
             row=1, column=1, columnspan=2, sticky="w", padx=4)
         out_frame.columnconfigure(1, weight=1)
@@ -2756,6 +3106,7 @@ class App(TkinterDnD.Tk):
                                     initialdir=first_dir or None)
         if d:
             self.sent_output.set(d)
+            self._save_cfg()
 
     def sent_run(self):
         paths = list(self.sent_items.values())
@@ -2763,6 +3114,13 @@ class App(TkinterDnD.Tk):
             messagebox.showwarning("提示", "请先添加一个或多个结果 Excel。")
             return
         out_dir = self.sent_output.get().strip()
+        if not out_dir:
+            messagebox.showwarning(
+                "请先选择输出目录",
+                "还没有选择输出目录，程序不会自动放到数据目录。\n\n"
+                "请点「浏览…」指定输出目录后再开始转换。")
+            return
+        self._save_cfg()
         ok, fail = 0, []
         self.status.config(text="正在转换，请稍候…")
         self.update_idletasks()
@@ -2770,8 +3128,9 @@ class App(TkinterDnD.Tk):
             for p in paths:
                 base = os.path.basename(p)
                 stem, ext = os.path.splitext(base)
-                target_dir = out_dir or os.path.dirname(p)
-                out = os.path.join(target_dir, f"{stem}_句式{ext or '.xlsx'}")
+                out = os.path.join(out_dir, f"{stem}_句式{ext or '.xlsx'}")
+                # 已存在同名文件时自动另存为 _1/_2，不覆盖、不打扰
+                out = unique_path_on_disk(out)
                 try:
                     convert_result_to_sentences(p, out)
                     ok += 1
@@ -2850,9 +3209,11 @@ class App(TkinterDnD.Tk):
             self.gen_btn.config(state="disabled")
             self.status.config(text="正在生成…")
             self.update_idletasks()
+            t0 = time.time()
             fill_word(template, output, students,
                       self.title_text.get(), self.class_name.get())
-            self.status.config(text=f"已生成：{output}")
+            self.status.config(
+                text=f"已生成：{output}（{time.time() - t0:.1f} 秒）")
             self._ask_open(output, len(students))
         except Exception as ex:
             self._error(ex)
@@ -3064,7 +3425,11 @@ class App(TkinterDnD.Tk):
             fill="x", pady=self._scaled_px(4))
 
         # 统计
-        tk.Label(body, text=f"涉及 {found_count} 人，共 {data_count} 条记录。",
+        stat = f"涉及 {found_count} 人，共 {data_count} 条记录。"
+        dups = getattr(self, "_name_dups", 0)
+        if dups:
+            stat += f"（名单中已忽略 {dups} 个重复姓名）"
+        tk.Label(body, text=stat,
                  bg=CARD_BG, fg=INK, font=(UI_FONT, 10),
                  anchor="w").pack(fill="x", pady=self._scaled_px(10))
 
