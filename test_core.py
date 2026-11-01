@@ -190,7 +190,102 @@ def test_add_year_to_date():
     eq(main.add_year_to_date("9月义务劳动", "2025-2026学年第一学期"),
        "2025年9月义务劳动", "第一学期 9 月用起始年")
     eq(main.add_year_to_date("3.6志愿服务", "某班统计表"),
-       "3.6志愿服务", "无法解析学期时原样返回")
+       "3月6日志愿服务", "无法解析学期时仍规范化日期、不补年")
+
+
+def test_no_semester_dates():
+    """文件名里没有学期时：日期仍要规范化并留在句首，且能被界面提示出来。"""
+    sem = "XX班20XX-20XX学年第X学期德育分统计表"
+    eq(main.add_year_to_date("4.9关工委工作礼仪活动", sem),
+       "4月9日关工委工作礼仪活动", "无学期时的 月.日")
+    eq(main.add_year_to_date("10月22号百团大战志愿活动", sem),
+       "10月22日百团大战志愿活动", "无学期时的 月日号")
+    eq(main.add_year_to_date("大二：11.25农学院体测活动", sem),
+       "11月25日农学院体测活动", "先去掉「大二：」再规范化日期")
+    eq(main.to_praise_sentence("4月9日关工委工作礼仪活动"),
+       "4月9日参与关工委工作礼仪活动", "没有年份时日期仍在句首")
+    eq(main.to_cert_sentence("11月25日院太极训练证书"),
+       "11月25日荣获院太极训练", "证书句子同样")
+
+    # 列表提示：识别不出学期时要能收集出来
+    no_sem = []
+    rows, missing, multi = main.collect_person_rows(
+        [os.path.join(TMP, "农学23-1班2025-2026学年第2学期德育分统计表.xlsx")],
+        ["张三"], no_semester=no_sem)
+    eq(no_sem, [], "文件名带学期时不应报警")
+
+    bad_name = os.path.join(TMP, "XX班20XX-20XX学年第X学期德育分统计表.xlsx")
+    shutil.copy(os.path.join(TMP, "sample.xlsx"), bad_name)
+    no_sem2 = []
+    main.collect_person_rows([bad_name], ["张三"], no_semester=no_sem2)
+    eq(no_sem2, ["XX班20XX-20XX学年第X学期德育分统计表.xlsx"], "应收集识别不出学期的文件")
+
+
+def test_lead_date_formats():
+    """开头带年份的各种写法（2026.5 / 2026.4.2 / 2026-5-6）都要统一成中文日期并留在句首。"""
+    sem = "2025-2026学年第2学期"
+    eq(main.add_year_to_date("2026.5创意视频拍摄表扬信", sem),
+       "2026年5月创意视频拍摄表扬信", "年.月 写法")
+    eq(main.add_year_to_date("2026.4.2春季穿搭", sem),
+       "2026年4月2日春季穿搭", "年.月.日 写法")
+    eq(main.add_year_to_date("2026-5-6志愿服务", sem),
+       "2026年5月6日志愿服务", "年-月-日 写法")
+    eq(main.to_praise_sentence("2026年5月创意视频拍摄表扬信"),
+       "2026年5月参与创意视频拍摄活动", "表扬信句子日期在句首")
+    eq(main.to_cert_sentence("2026年4月2日春季穿搭证书"),
+       "2026年4月2日荣获春季穿搭", "证书句子日期在句首")
+    eq(main.add_year_to_date("9.9宿舍搬迁表扬信", sem),
+       "2026年9月9日宿舍搬迁表扬信", "不带年份的写法仍按学期补年")
+
+
+def test_sentence_trailing_semicolon():
+    """句式转换后每一条都以「；」结尾（和源表书写习惯一致）。"""
+    rows = [("张三", "2026年3月院级学霸宿舍奖\n2026年6月省志愿者证书",
+             "参加校园积雪清扫活动；\n2026年7月5日宿舍搬迁表扬信",
+             "2025-2026学年第2学期", False)]
+    src = os.path.join(TMP, "分号测试.xlsx")
+    dst = os.path.join(TMP, "分号测试_句式.xlsx")
+    main.write_person_result_xlsx(rows, src)
+    main.convert_result_to_sentences(src, dst)
+    wb = openpyxl.load_workbook(dst)
+    ws = wb.active
+    certs = str(ws.cell(2, 2).value).split("\n")
+    praises = str(ws.cell(2, 3).value).split("\n")
+    wb.close()
+    for line in certs + praises:
+        truth(line.endswith("；"), f"每行应以「；」结尾，实际：{line!r}")
+    eq(certs[0], "2026年3月荣获院级学霸宿舍奖；", "证书句子")
+    eq(praises[0], "参与校园积雪清扫活动；", "表扬信句子")
+
+
+def test_verb_before_date():
+    """「参与2026年4.10…」这类动词在日期前面的写法，日期要提到句首。"""
+    eq(main.to_praise_sentence("参与2026年4.10拟发展对象材料审核工作表扬信"),
+       "2026年4月10日参与拟发展对象材料审核工作", "参与在日期前 + 年.月.日")
+    eq(main.to_praise_sentence("参与2026年7.5宿舍搬迁表扬信"),
+       "2026年7月5日参与宿舍搬迁活动", "参与在日期前 + 年.月")
+    eq(main.to_praise_sentence(
+        "参与2026年3月河南农业大学举办“挑战杯”大学生创业计划竞赛决赛志愿活动表扬信"),
+       "2026年3月参与河南农业大学举办“挑战杯”大学生创业计划竞赛决赛志愿活动",
+       "参与在「2026年3月」前")
+    eq(main.normalize_lead_date("2026年4.10拟发展对象材料审核工作"),
+       "2026年4月10日拟发展对象材料审核工作", "年.月.日 混写规范化")
+    eq(main.to_cert_sentence("参与2026年4月10日志愿服务证书"),
+       "2026年4月10日参与志愿服务", "证书里的动词要保留、日期提前")
+
+
+def test_praise_verb_prefix():
+    """源数据本身带「参加/参与」时，不能拼成「参与参加…」；结尾标点也要去掉。"""
+    eq(main.to_praise_sentence("参加校园积雪清扫活动；表扬信"),
+       "参与校园积雪清扫活动", "参加 → 换成参与，且不留分号")
+    eq(main.to_praise_sentence("参与参加三下乡出征仪式授旗活动表扬信"),
+       "参与三下乡出征仪式授旗活动", "叠加的动词只留一个")
+    eq(main.to_praise_sentence("参加百团大战会场布置志愿者活动表扬信"),
+       "参与百团大战会场布置志愿者活动", "普通「参加」条目")
+    eq(main.to_cert_sentence("参与发表论文"),
+       "参与发表论文", "证书里的参与类保持原样")
+    eq(main.to_cert_sentence("2026年3月校级新闻；"),
+       "2026年3月荣获校级新闻", "证书结尾标点也要去掉")
 
 
 def test_cert_sentences():
@@ -361,7 +456,9 @@ def test_process_one_excel_month_filter():
 # ---------------------------------------------------------------- 界面（线程调度）
 def test_batch_threads():
     """批量生成走后台线程 + 结果队列：两个同名源文件应各自成功并自动错开文件名。
-    需要图形环境，没有 Tk 时跳过。"""
+    需要图形环境；CI 上通过 SKIP_GUI_TESTS=1 跳过。"""
+    if os.environ.get("SKIP_GUI_TESTS"):
+        raise Skip("已设置 SKIP_GUI_TESTS，跳过图形测试")
     try:
         app = main.App()
     except Exception as exc:
@@ -415,6 +512,45 @@ def test_batch_threads():
             pass
 
 
+def test_batch_analyze_threads():
+    """批量分析走后台线程：加入文件后列表能自动填好工作表、人数、状态。"""
+    if os.environ.get("SKIP_GUI_TESTS"):
+        raise Skip("已设置 SKIP_GUI_TESTS，跳过图形测试")
+    try:
+        app = main.App()
+    except Exception as exc:
+        raise Skip(f"无图形环境：{exc}")
+
+    cfg_path = os.path.join(TMP, "gui_config2.json")
+    orig_cfg = main.config_file
+    main.config_file = lambda: cfg_path
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"template_path": os.path.join(TMP, "template.docx"),
+                       "about_seen": True}, f, ensure_ascii=False)
+        app.withdraw()
+        xlsx = os.path.join(TMP, "农学23-1班2025-2026学年第2学期德育分统计表.xlsx")
+        app._batch_add_files([xlsx])
+        t0 = time.time()
+        while time.time() - t0 < 30:
+            app.update()
+            time.sleep(0.03)
+            if not app._analyze_queue and app._analyze_pending == 0:
+                break
+        eq(len(app.batch_info), 1, "应完成 1 个文件的分析")
+        vals = app.batch_tree.item(app.batch_tree.get_children()[0], "values")
+        eq(vals[1], "大三下", "工作表")
+        eq(vals[2], "3", "人数")
+        eq(vals[3], "就绪（2项异常，双击查看）",
+           "状态（样本里李四空分数、王五负分）")
+    finally:
+        main.config_file = orig_cfg
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- 主流程
 def main_entry():
     global TMP
@@ -436,8 +572,13 @@ def main_entry():
         print("\n=== 证书 / 表扬信 ===")
         check("跨月份提取证书与表扬信", test_cert_and_praise_extract)
         check("日期补年份", test_add_year_to_date)
+        check("开头自带年份的日期写法", test_lead_date_formats)
+        check("识别不出学期时的日期处理", test_no_semester_dates)
         check("证书句子措辞", test_cert_sentences)
         check("表扬信句子措辞", test_praise_sentences)
+        check("参与/参加 不重复、结尾标点清理", test_praise_verb_prefix)
+        check("「参与」在日期前面时日期提前", test_verb_before_date)
+        check("每条句子以「；」结尾", test_sentence_trailing_semicolon)
 
         print("\n=== 名单与结果文件 ===")
         check("名单解析与去重", test_parse_name_text)
@@ -457,6 +598,7 @@ def main_entry():
 
         print("\n=== 界面 / 线程调度（无图形环境时跳过）===")
         check("批量生成后台线程 + 同名自动错开", test_batch_threads)
+        check("批量分析后台线程", test_batch_analyze_threads)
 
         passed = sum(1 for _, ok, _ in RESULTS if ok)
         total = len(RESULTS)

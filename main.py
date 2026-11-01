@@ -49,7 +49,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.12.2"
+APP_VERSION = "v1.12.5"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -843,15 +843,111 @@ def _month_of_token(tok):
     return _CN_MONTHS.get(tok)
 
 
+# 开头自带年份的日期：2026.5 / 2026.5.6 / 2026-5-6 / 2026/5/6
+_LEAD_YMD_RE = re.compile(r"^(\d{4})[.\-/](\d{1,2})(?:[.\-/](\d{1,2}))?(.*)$")
+# 开头「2026年4.10」这种混写
+_LEAD_CN_YMD_RE = re.compile(r"^(\d{4})年(\d{1,2})[.\-/](\d{1,2})(.*)$")
+# 开头「2026年4月10号」「2026年4月」
+_LEAD_CN_MD_RE = re.compile(r"^(\d{4})年(\d{1,2})月(?:(\d{1,2})[日号])?(.*)$")
+# 开头「月.日」：4.9 / 10.22
+_LEAD_MD_RE = re.compile(r"^(\d{1,2})[.\-/](\d{1,2})(.*)$")
+# 开头「月日」：10月22号 / 5月6日 / 8月
+_LEAD_MONTH_RE = re.compile(r"^(\d{1,2})月(?:(\d{1,2})[日号])?(.*)$")
+# 开头的学年/年级批注：大二： / 大一: / 大四：
+_LEAD_LABEL_RE = re.compile(r"^大[一二三四1234]\s*[:：]\s*")
+# 判断某个位置是否以日期开头（用于「参与2026年4月…」这类前缀清理）
+_DATE_START_RE = re.compile(r"^(?:\d{4}年\d{1,2}月|\d{4}年\d{1,2}[.\-/]\d{1,2}"
+                            r"|\d{4}[.\-/]\d{1,2}|\d{1,2}[.\-/]\d{1,2}"
+                            r"|\d{1,2}月)")
+
+
+def strip_leading_label(text):
+    """去掉条目开头的「大二：」「大一:」这类批注前缀。"""
+    return _LEAD_LABEL_RE.sub("", str(text).strip())
+
+
+def strip_verbs_before_date(text):
+    """当「参与/参加」后面紧跟日期时，去掉这层动词，让日期能提到最前面。
+    例：「参与2026年4月10日…」→「2026年4月10日…」；
+    但「参与发表论文」不动（后面不是日期）。"""
+    s = str(text).strip()
+    changed = True
+    while changed:
+        changed = False
+        for v in _LEAD_VERBS:
+            if s.startswith(v) and _DATE_START_RE.match(s[len(v):].lstrip()):
+                s = s[len(v):].lstrip()
+                changed = True
+    return s
+
+
+def normalize_lead_date(text):
+    """把开头的日期统一成中文格式，并保证它留在最前面：
+    「2026.5」→「2026年5月」、「2026-5-6」→「2026年5月6日」、
+    「2026年4.10」→「2026年4月10日」、「4.9」→「4月9日」、
+    「10月22号」→「10月22日」、「8月」保持。
+    开头不是日期则原样返回。"""
+    s = strip_leading_label(text)
+    m = _LEAD_YMD_RE.match(s)
+    if m:
+        year, mon = int(m.group(1)), int(m.group(2))
+        day, rest = m.group(3), m.group(4)
+        if not (1 <= mon <= 12):
+            return s
+        if day is None:
+            return f"{year}年{mon}月{rest}"
+        di = int(day)
+        if not (1 <= di <= 31):
+            return s
+        return f"{year}年{mon}月{di}日{rest}"
+    m = _LEAD_CN_YMD_RE.match(s)
+    if m:
+        year, mon, day, rest = (int(m.group(1)), int(m.group(2)),
+                                int(m.group(3)), m.group(4))
+        if 1 <= mon <= 12 and 1 <= day <= 31:
+            return f"{year}年{mon}月{day}日{rest}"
+    m = _LEAD_CN_MD_RE.match(s)
+    if m:
+        year, mon = int(m.group(1)), int(m.group(2))
+        day, rest = m.group(3), m.group(4)
+        if 1 <= mon <= 12:
+            if day:
+                di = int(day)
+                if 1 <= di <= 31:
+                    return f"{year}年{mon}月{di}日{rest}"
+            return f"{year}年{mon}月{rest}"
+    m = _LEAD_MD_RE.match(s)
+    if m:
+        mon, day, rest = int(m.group(1)), int(m.group(2)), m.group(3)
+        if 1 <= mon <= 12 and 1 <= day <= 31:
+            return f"{mon}月{day}日{rest}"
+    m = _LEAD_MONTH_RE.match(s)
+    if m:
+        mon = int(m.group(1))
+        day, rest = m.group(2), m.group(3)
+        if 1 <= mon <= 12:
+            if day:
+                di = int(day)
+                if 1 <= di <= 31:
+                    return f"{mon}月{di}日{rest}"
+            return f"{mon}月{rest}"
+    return s
+
+
 def add_year_to_date(text, semester_str):
     """把条目里的简短日期按学期补全年份，完整日期放到最前面（中文格式）。
-    支持：开头「3.6」→「2026年3月6日」；开头/中间「8月」「五月」→「2026年8月」并移到最前。
-    阿拉伯数字与中文数字月份都识别；无法解析学期时原样返回。"""
+    支持：开头「3.6」→「2026年3月6日」；开头/中间「8月」「五月」→「2026年8月」并移到最前；
+    开头已是「2026.5」「2026-5-6」的，只统一格式、不重复补年。
+    识别不出学期时不补年份，但仍会把开头的日期规范化并留在最前面。"""
+    s = strip_leading_label(text)
+    # 0) 开头自带年份的写法：只统一格式，不再重复补年
+    if _LEAD_YMD_RE.match(s):
+        return normalize_lead_date(s)
     info = parse_semester(semester_str)
     if not info:
-        return text
+        # 识别不出学期：不补年，但仍把开头日期规范化并留在最前
+        return normalize_lead_date(s)
     start_y, end_y, term = info
-    s = str(text).strip()
 
     # 1) 开头「月.日」（仅阿拉伯数字）
     m = re.match(r"^(\d{1,2})\.(\d{1,2})(.*)$", s)
@@ -881,12 +977,14 @@ def add_year_to_date(text, semester_str):
     return s
 
 
-def collect_person_rows(paths, wanted_names, on_progress=None, failed=None):
+def collect_person_rows(paths, wanted_names, on_progress=None, failed=None,
+                        no_semester=None):
     """按名单在多个源文件中提取（姓名模糊匹配：自动去空格、去括号后缀）。
     rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
     同名在多个文件出现时，每个文件各自一行，并在末尾追加一行「姓名（合计）」汇总。
     on_progress(i, total, 文件名)：每读完一个源表回调一次，用于界面显示进度。
     failed：传入列表时，把读取失败的源表以 (文件名, 原因) 追加进去，供界面提示。
+    no_semester：传入列表时，把无法从文件名识别学期的源表名追加进去，供界面提示。
     返回 (rows, missing, multi_names)：
       missing = 在所有源表中都找不到的姓名；
       multi_names = 在多个源表中出现、已加合计行的姓名。"""
@@ -903,6 +1001,8 @@ def collect_person_rows(paths, wanted_names, on_progress=None, failed=None):
                 quiet_log(f"读取源表失败：{os.path.basename(p)}", ex)
         if data:
             sem = extract_semester(os.path.basename(p))
+            if no_semester is not None and not parse_semester(sem):
+                no_semester.append(os.path.basename(p))
             norm_data = {}
             for k, v in data.items():
                 nk = normalize_name(k)
@@ -1009,38 +1109,68 @@ def cert_sentence_prefix(item):
 
 
 # 开头已补全的完整日期，如「2026年3月」「2026年7月5日」
-_LEAD_DATE_RE = re.compile(r"^(\d{4}年\d{1,2}月(?:\d{1,2}日)?)(.*)$")
+_LEAD_DATE_RE = re.compile(r"^((?:\d{4}年)?\d{1,2}月(?:\d{1,2}[日号])?)(.*)$")
 
 
 def to_cert_sentence(item):
     """证书条目转句子：
     - 只去掉结尾的「证书」二字（不再删正文里的「证书」）；
-    - 以「参与」开头的条目本身是成果陈述（如「参与发表论文」），不加前缀；
+    - 以「参与/参加」开头的条目本身是成果陈述（如「参与发表论文」），不加前缀；
+    - 「参与2026年4月…」这类动词在日期前面的，把日期提到最前、动词保留；
     - 其余按类型加「荣获 / 被评为」，开头已有完整日期时日期保持在最前。"""
     t = str(item).strip()
     while t.endswith("证书"):
         t = t[:-2].strip()
+    verb = ""
+    for v in _LEAD_VERBS:
+        if t.startswith(v) and _DATE_START_RE.match(t[len(v):].lstrip()):
+            verb, t = v, t[len(v):].lstrip()
+            break
+    t = normalize_lead_date(t)
     m = _LEAD_DATE_RE.match(t)
+    date, rest = ("", t)
     if m:
         date, rest = m.group(1), m.group(2).strip()
-        if rest.startswith("参与"):
-            return date + rest
-        return date + cert_sentence_prefix(rest) + rest
-    if t.startswith("参与"):
-        return t
-    return cert_sentence_prefix(t) + t
+    rest = _clean_tail(rest)
+    if verb:
+        rest = verb + rest
+    if not rest:
+        return date
+    if rest.startswith(_LEAD_VERBS):
+        return date + rest
+    return date + cert_sentence_prefix(rest) + rest
 
 
 # 这些结尾的条目本身是「工作/会议/讲座/考核/训练」等，不适合再加「活动」
 _PRAISE_NO_SUFFIX = ("工作", "会", "讲座", "考核", "参与", "训练", "表演")
+# 源数据里常见的动词前缀：参与 / 参加（可能叠加，如「参与参加…」）
+_LEAD_VERBS = ("参与", "参加")
+
+
+def strip_lead_verbs(text):
+    """去掉条目开头重复的「参与」「参加」（可叠加多层）。"""
+    b = str(text).strip()
+    changed = True
+    while changed:
+        changed = False
+        for v in _LEAD_VERBS:
+            if b.startswith(v):
+                b = b[len(v):].strip()
+                changed = True
+    return b
+
+
+def _clean_tail(text):
+    """去掉条目末尾多余的中英文分号、逗号、句号。"""
+    return str(text).strip().rstrip("；;。，,、 ").strip()
 
 
 def _praise_body(rest):
-    """构造「参与」后面的正文：去掉源数据已有的「参与」前缀（避免重复），
-    再按语义决定是否在结尾补「活动」。"""
-    b = str(rest).strip()
-    if b.startswith("参与"):
-        b = b[2:].strip()
+    """构造「参与」后面的正文：去掉源数据已有的「参与/参加」前缀（避免重复），
+    去掉结尾标点，再按语义决定是否在结尾补「活动」。"""
+    b = _clean_tail(strip_lead_verbs(rest))
+    if not b:
+        return b
     if "活动" in b or b.endswith(_PRAISE_NO_SUFFIX):
         return b
     return b + "活动"
@@ -1055,6 +1185,8 @@ def to_praise_sentence(item):
         if t.endswith(tail):
             t = t[:-len(tail)].strip()
             break
+    # 动词在日期前（「参与2026年4月…」）时先摘掉动词，再把日期提到最前
+    t = normalize_lead_date(strip_lead_verbs(t))
     m = _LEAD_DATE_RE.match(t)
     if m:
         date, rest = m.group(1), m.group(2).strip()
@@ -1063,11 +1195,22 @@ def to_praise_sentence(item):
 
 
 def _sentence_lines(value, conv):
-    """单元格多行文本按换行拆分，逐条经 conv 转换；忽略空行。"""
+    """单元格多行文本按换行拆分，逐条经 conv 转换；忽略空行。
+    每条转换结果统一以「；」结尾（和源表的书写习惯一致）。"""
     if value is None:
         return []
     s = str(value).replace("\r\n", "\n").replace("\r", "\n")
-    return [conv(x) for x in s.split("\n") if x.strip()]
+    out = []
+    for x in s.split("\n"):
+        if not x.strip():
+            continue
+        line = conv(x).strip()
+        if not line:
+            continue
+        if not line.endswith("；"):
+            line += "；"
+        out.append(line)
+    return out
 
 
 def convert_result_to_sentences(in_path, out_path):
@@ -1329,6 +1472,8 @@ class App(TkinterDnD.Tk):
         self.batch_info = {}         # tree item -> 分析结果 dict
         self.batch_path_set = set()  # 已加入文件去重
         self._analyze_queue = []
+        self._analyze_q = queue.Queue()   # 后台分析结果
+        self._analyze_pending = 0         # 正在分析的文件数
         self.batch_month_vars = {}   # 月份段 -> IntVar（批量页复选框）
         self.batch_overrides = {}    # item -> {"title":..,"class":..}
         self._gen_queue = []
@@ -2418,16 +2563,49 @@ class App(TkinterDnD.Tk):
             self._pump_analyze()
 
     def _pump_analyze(self):
-        if not self._analyze_queue:
+        """调度器：逐个文件交给后台线程分析，主线程只刷新列表，加几十个文件也不卡。"""
+        while True:
+            try:
+                item, path, payload = self._analyze_q.get_nowait()
+            except queue.Empty:
+                break
+            self._analyze_pending = max(0, self._analyze_pending - 1)
+            self._apply_analyze_result(item, path, payload)
+        if not self._analyze_queue and self._analyze_pending == 0:
             self._batch_refresh_status()
             return
-        item = self._analyze_queue.pop(0)
-        path = self.batch_items.get(item)
+        if self._analyze_pending == 0 and self._analyze_queue:
+            item = self._analyze_queue.pop(0)
+            path = self.batch_items.get(item)
+            if not path:                      # 分析前被移除了，跳过
+                self.after(10, self._pump_analyze)
+                return
+            self._analyze_pending = 1
+            self.batch_tree.item(
+                item,
+                values=(os.path.basename(path), "-", "-", "分析中…"))
+            threading.Thread(target=self._analyze_worker,
+                             args=(item, path), daemon=True).start()
+        self.after(50, self._pump_analyze)
+
+    def _analyze_worker(self, item, path):
+        """后台线程：读取并识别一个统计表。"""
         try:
             info = analyze_excel_auto(path)
-            problems = validate_students(info["students"])
-            info["problems"] = problems
+            info["problems"] = validate_students(info["students"])
+            payload = (True, info, "")
+        except Exception as ex:
+            payload = (False, None, str(ex))
+        self._analyze_q.put((item, path, payload))
+
+    def _apply_analyze_result(self, item, path, payload):
+        """主线程：把分析结果写回列表。"""
+        ok, info, err = payload
+        if not self.batch_tree.exists(item):   # 分析期间被删除了
+            return
+        if ok:
             self.batch_info[item] = info
+            problems = info["problems"]
             if problems and problems[0][0] == "zero":
                 status, tags = "异常：没有学生数据", ("warn",)
             elif problems:
@@ -2440,15 +2618,11 @@ class App(TkinterDnD.Tk):
                 values=(os.path.basename(path), info["sheet"],
                         len(info["students"]), status),
                 tags=tags)
-        except Exception as ex:
+        else:
             self.batch_tree.item(
                 item,
-                values=(os.path.basename(path), "-", "-", f"失败：{ex}"),
+                values=(os.path.basename(path), "-", "-", f"失败：{err}"),
                 tags=("error",))
-        if self._analyze_queue:
-            self.after(10, self._pump_analyze)
-        else:
-            self._batch_refresh_status()
 
     def _refresh_batch_month_checks(self):
         """汇总所有已分析文件的月份段并集，生成复选框（保留旧勾选）。"""
@@ -2989,9 +3163,11 @@ class App(TkinterDnD.Tk):
             self.status.config(text=f"正在提取 {i}/{total}：{name}")
             self.update_idletasks()
 
-        failed = []  # 读取失败的源表：(文件名, 原因)
+        failed = []       # 读取失败的源表：(文件名, 原因)
+        no_semester = []  # 文件名里识别不出学期的源表
         try:
-            rows, missing, multi = collect_person_rows(paths, names, on_prog, failed)
+            rows, missing, multi = collect_person_rows(
+                paths, names, on_prog, failed, no_semester)
             self.ext_bar["value"] = 0
             if not rows:
                 if failed:
@@ -3016,7 +3192,8 @@ class App(TkinterDnD.Tk):
             self.status.config(text="就绪")
         found = [n for n in names if n not in missing]
         data_count = sum(1 for r in rows if not r[4])
-        self._extract_done_dialog(out, len(found), data_count, multi, missing, failed)
+        self._extract_done_dialog(out, len(found), data_count, multi, missing,
+                                  failed, no_semester)
 
     # ---------- 句子形式转换页 ----------
     def _build_sentence_tab(self, parent):
@@ -3425,8 +3602,8 @@ class App(TkinterDnD.Tk):
             row=0, column=2, padx=8)
 
     def _extract_done_dialog(self, out, found_count, data_count, multi, missing,
-                             failed=None):
-        """提取完成弹窗：绿色主题，分区显示输出路径、统计、多源表/未找到人员/读取失败。"""
+                             failed=None, no_semester=None):
+        """提取完成弹窗：绿色主题，分区显示输出路径、统计、多源表/未找到人员/读取失败/学期未识别。"""
         top = tk.Toplevel(self)
         top.title("提取完成")
         top.transient(self)
@@ -3504,6 +3681,26 @@ class App(TkinterDnD.Tk):
             tk.Label(xb, text="、".join(missing), bg="#fdecec", fg=INK,
                      font=(UI_FONT, 9), justify="left", anchor="w",
                      wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10)).pack(
+                fill="x", pady=(0, self._scaled_px(6)))
+
+        # 文件名里识别不出学期的源表（会导仅规范化日期、不补年份）
+        if no_semester:
+            sb = tk.Frame(body, bg="#fdf6e3", highlightthickness=1,
+                          highlightbackground="#e8d48b")
+            sb.pack(fill="x", pady=(0, self._scaled_px(8)))
+            tk.Label(sb,
+                     text=f"以下 {len(no_semester)} 个源表无法从文件名识别学期，"
+                          "日期只做格式统一、没有补年份：",
+                     bg="#fdf6e3", fg="#8a6d1a", font=(UI_FONT, 9, "bold"),
+                     justify="left", anchor="w",
+                     wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10),
+                     pady=self._scaled_px(6)).pack(fill="x")
+            tk.Label(sb, text="、".join(no_semester[:5])
+                     + "（文件名里带上「2025-2026学年第二学期」这类字样即可自动补年）",
+                     bg="#fdf6e3", fg=INK, font=(UI_FONT, 9), justify="left",
+                     anchor="w", wraplength=self._scaled_px(460),
                      padx=self._scaled_px(10)).pack(
                 fill="x", pady=(0, self._scaled_px(6)))
 
