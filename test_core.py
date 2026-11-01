@@ -300,6 +300,41 @@ def test_config_roundtrip():
         main.config_file = orig
 
 
+def test_unreadable_source_reported():
+    """混入损坏的源表时，必须把它报出来，不能静默跳过。"""
+    good = os.path.join(TMP, "农学23-1班2025-2026学年第2学期德育分统计表.xlsx")
+    bad = os.path.join(TMP, "损坏的统计表.xlsx")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write("这不是一个真正的 Excel 文件")
+    failed = []
+    rows, missing, multi = main.collect_person_rows([good, bad], ["张三"], failed=failed)
+    eq(len(rows), 1, "正常源表仍应提取到 1 行")
+    eq(len(failed), 1, "应记录 1 个读取失败的源表")
+    eq(failed[0][0], "损坏的统计表.xlsx", "失败文件名")
+    truth("损坏" in failed[0][1] or "Excel" in failed[0][1], "失败原因应为中文可读提示")
+
+
+def test_friendly_excel_errors():
+    """打不开的文件要给出中文原因，而不是 openpyxl 的英文异常。"""
+    bad = os.path.join(TMP, "坏文件.xlsx")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write("not a workbook")
+    try:
+        main.load_workbook_checked(bad)
+        raise AssertionError("损坏文件应当报错")
+    except ValueError as exc:
+        truth("损坏" in str(exc) or "Excel" in str(exc), f"中文提示，实际：{exc}")
+
+    old = os.path.join(TMP, "老格式.xls")
+    with open(old, "wb") as f:
+        f.write(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    try:
+        main.load_workbook_checked(old)
+        raise AssertionError(".xls 应当报错")
+    except ValueError as exc:
+        truth("xls" in str(exc).lower() or "另存为" in str(exc), f"应提示另存为 xlsx，实际：{exc}")
+
+
 def test_process_one_excel():
     outdir = os.path.join(TMP, "out")
     os.makedirs(outdir, exist_ok=True)
@@ -408,6 +443,8 @@ def main_entry():
         check("名单解析与去重", test_parse_name_text)
         check("提取结果写出 / 句式转换保留来源学期", test_collect_and_write_then_convert)
         check("同名文件自动另存 _1/_2", test_unique_path)
+        check("损坏源表会被报出来", test_unreadable_source_reported)
+        check("打不开的文件给中文提示", test_friendly_excel_errors)
 
         print("\n=== Word 生成 ===")
         check("模板结构校验", test_template_structure)

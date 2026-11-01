@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 德育分签字表生成器
 - 不写死文件名 / 工作表 / 表头名 / 列位置 / 人数，通用适配。
@@ -25,6 +25,8 @@ import urllib.request
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.exceptions import InvalidFileException
+from zipfile import BadZipFile
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -47,7 +49,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.12.1"
+APP_VERSION = "v1.12.2"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -161,8 +163,28 @@ def save_config(cfg):
 
 
 # ============================ Excel 读取与识别 ============================
+def load_workbook_checked(path, **kwargs):
+    """打开工作簿，把 openpyxl 的英文异常翻译成用户看得懂的中文提示。"""
+    name = os.path.basename(str(path))
+    try:
+        return openpyxl.load_workbook(path, **kwargs)
+    except FileNotFoundError:
+        raise ValueError(f"文件不存在：{name}")
+    except PermissionError:
+        raise ValueError(f"文件正被占用（可能正在 Excel 中打开），请关闭后重试：{name}")
+    except InvalidFileException:
+        raise ValueError(f"不支持该文件格式，.xls 老格式请先在 Excel 里另存为 .xlsx：{name}")
+    except BadZipFile:
+        raise ValueError(f"文件已损坏，或不是有效的 Excel（.xlsx）文件：{name}")
+    except Exception as ex:
+        msg = str(ex)
+        if "old .xls" in msg.lower():
+            raise ValueError(f"不支持 .xls 老格式，请先在 Excel 里另存为 .xlsx：{name}")
+        raise ValueError(f"无法打开 Excel 文件：{name}（{msg[:60]}）")
+
+
 def list_sheets(path):
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    wb = load_workbook_checked(path, data_only=True, read_only=True)
     names = list(wb.sheetnames)
     wb.close()
     return names
@@ -574,7 +596,7 @@ def analyze_excel_auto(path, selected_months=None):
     """对单个文件自动识别（第一个工作表、全部月份组）。
     selected_months：只统计这些月份段（集合）；None = 全部月份段。
     返回 dict：sheet/title/class/students；识别失败抛异常。"""
-    wb = openpyxl.load_workbook(path, data_only=True)
+    wb = load_workbook_checked(path, data_only=True)
     try:
         if not wb.sheetnames:
             raise ValueError("工作簿中没有工作表。")
@@ -712,7 +734,7 @@ def locate_cert_praise_cols(ws):
 def extract_persons_from_workbook(path):
     """读取一个工作簿内所有符合新模板的工作表，
     返回 {姓名: (证书列表, 表扬信列表)}。不去重，完整保留跨月份条目。"""
-    wb = openpyxl.load_workbook(path, data_only=True)
+    wb = load_workbook_checked(path, data_only=True)
     result = {}
     try:
         for ws in wb.worksheets:
@@ -859,11 +881,12 @@ def add_year_to_date(text, semester_str):
     return s
 
 
-def collect_person_rows(paths, wanted_names, on_progress=None):
+def collect_person_rows(paths, wanted_names, on_progress=None, failed=None):
     """按名单在多个源文件中提取（姓名模糊匹配：自动去空格、去括号后缀）。
     rows = [(姓名, 证书文本, 表扬信文本, 来源文件名, 是否合计行), ...]，按名单顺序；
     同名在多个文件出现时，每个文件各自一行，并在末尾追加一行「姓名（合计）」汇总。
     on_progress(i, total, 文件名)：每读完一个源表回调一次，用于界面显示进度。
+    failed：传入列表时，把读取失败的源表以 (文件名, 原因) 追加进去，供界面提示。
     返回 (rows, missing, multi_names)：
       missing = 在所有源表中都找不到的姓名；
       multi_names = 在多个源表中出现、已加合计行的姓名。"""
@@ -872,8 +895,12 @@ def collect_person_rows(paths, wanted_names, on_progress=None):
     for idx, p in enumerate(paths, 1):
         try:
             data = extract_persons_from_workbook(p)
-        except Exception:
+        except Exception as ex:
             data = {}
+            if failed is not None:
+                failed.append((os.path.basename(p), str(ex)))
+            else:
+                quiet_log(f"读取源表失败：{os.path.basename(p)}", ex)
         if data:
             sem = extract_semester(os.path.basename(p))
             norm_data = {}
@@ -1047,7 +1074,7 @@ def convert_result_to_sentences(in_path, out_path):
     """读取第三页签生成的三列结果 Excel（姓名|证书|表扬信，含合计行），
     把证书/表扬信条目转为完整句子，另存为新的三列 Excel。
     返回数据行数（不含合计行）。"""
-    wb = openpyxl.load_workbook(in_path)
+    wb = load_workbook_checked(in_path)
     ws = wb.active
     rows = []
     data_count = 0
@@ -1947,7 +1974,7 @@ class App(TkinterDnD.Tk):
                 self.wb.close()
             except Exception as ex:
                 quiet_log("关闭工作簿", ex)
-        self.wb = openpyxl.load_workbook(path, data_only=True)
+        self.wb = load_workbook_checked(path, data_only=True)
         names = list(self.wb.sheetnames)
         self.sheet_combo["values"] = names
         self.sheet_name.set(names[0] if names else "")
@@ -2895,7 +2922,7 @@ class App(TkinterDnD.Tk):
         if not path:
             return
         try:
-            wb = openpyxl.load_workbook(path, data_only=True)
+            wb = load_workbook_checked(path, data_only=True)
             ws = wb.active
             # 在前 5 行内找含「姓名」的表头（兼容表头不在第 1 行）
             name_col, header_row = 1, 1
@@ -2962,12 +2989,19 @@ class App(TkinterDnD.Tk):
             self.status.config(text=f"正在提取 {i}/{total}：{name}")
             self.update_idletasks()
 
+        failed = []  # 读取失败的源表：(文件名, 原因)
         try:
-            rows, missing, multi = collect_person_rows(paths, names, on_prog)
+            rows, missing, multi = collect_person_rows(paths, names, on_prog, failed)
             self.ext_bar["value"] = 0
             if not rows:
-                messagebox.showwarning(
-                    "提示", "名单中的人员在所有源表中均未找到，请核对名单。")
+                if failed:
+                    detail = "\n".join(f"{n}：{e}" for n, e in failed[:5])
+                    messagebox.showerror(
+                        "源表读取失败",
+                        f"{len(failed)} 个源表都没能读取，无法提取：\n\n{detail}")
+                else:
+                    messagebox.showwarning(
+                        "提示", "名单中的人员在所有源表中均未找到，请核对名单。")
                 return
             write_person_result_xlsx(rows, out)
         except PermissionError:
@@ -2982,7 +3016,7 @@ class App(TkinterDnD.Tk):
             self.status.config(text="就绪")
         found = [n for n in names if n not in missing]
         data_count = sum(1 for r in rows if not r[4])
-        self._extract_done_dialog(out, len(found), data_count, multi, missing)
+        self._extract_done_dialog(out, len(found), data_count, multi, missing, failed)
 
     # ---------- 句子形式转换页 ----------
     def _build_sentence_tab(self, parent):
@@ -3390,8 +3424,9 @@ class App(TkinterDnD.Tk):
         ttk.Button(btns, text="关闭", command=top.destroy).grid(
             row=0, column=2, padx=8)
 
-    def _extract_done_dialog(self, out, found_count, data_count, multi, missing):
-        """提取完成弹窗：绿色主题，分区显示输出路径、统计、多源表/未找到人员。"""
+    def _extract_done_dialog(self, out, found_count, data_count, multi, missing,
+                             failed=None):
+        """提取完成弹窗：绿色主题，分区显示输出路径、统计、多源表/未找到人员/读取失败。"""
         top = tk.Toplevel(self)
         top.title("提取完成")
         top.transient(self)
@@ -3467,6 +3502,22 @@ class App(TkinterDnD.Tk):
                      padx=self._scaled_px(10),
                      pady=self._scaled_px(6)).pack(fill="x")
             tk.Label(xb, text="、".join(missing), bg="#fdecec", fg=INK,
+                     font=(UI_FONT, 9), justify="left", anchor="w",
+                     wraplength=self._scaled_px(460),
+                     padx=self._scaled_px(10)).pack(
+                fill="x", pady=(0, self._scaled_px(6)))
+
+        # 读取失败的源表
+        if failed:
+            fb = tk.Frame(body, bg="#fdecec", highlightthickness=1,
+                          highlightbackground="#e6a8a8")
+            fb.pack(fill="x", pady=(0, self._scaled_px(8)))
+            tk.Label(fb, text=f"以下 {len(failed)} 个源表读取失败，数据可能不完整：",
+                     bg="#fdecec", fg="#b03a3a", font=(UI_FONT, 9, "bold"),
+                     anchor="w", padx=self._scaled_px(10),
+                     pady=self._scaled_px(6)).pack(fill="x")
+            msg = "\n".join(f"{n}：{e}" for n, e in failed[:5])
+            tk.Label(fb, text=msg, bg="#fdecec", fg=INK,
                      font=(UI_FONT, 9), justify="left", anchor="w",
                      wraplength=self._scaled_px(460),
                      padx=self._scaled_px(10)).pack(
