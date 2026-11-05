@@ -49,7 +49,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.12.5"
+APP_VERSION = "v1.12.6"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -1962,7 +1962,7 @@ class App(TkinterDnD.Tk):
             row=r, column=4, **pad)
 
         r += 1
-        ttk.Label(root, text="（输出目录留空 = 与数据源同目录）",
+        ttk.Label(root, text="（必选：点「浏览…」指定输出目录，不会再默认放到数据源目录）",
                   foreground="gray").grid(row=r, column=1, columnspan=3, sticky="w", padx=8)
 
         r += 1
@@ -2331,7 +2331,7 @@ class App(TkinterDnD.Tk):
                    command=self.browse_output_dir).grid(row=1, column=3, padx=4)
         ttk.Button(set_frame, text="清除",
                    command=self.clear_output_dir).grid(row=1, column=4, padx=4)
-        ttk.Label(set_frame, text="（输出目录留空 = 每个文件与数据源同目录）",
+        ttk.Label(set_frame, text="（必选：点「浏览…」指定输出目录，不会再默认放到数据源目录）",
                   foreground="gray").grid(
             row=2, column=1, columnspan=3, sticky="w", padx=4)
         set_frame.columnconfigure(1, weight=1)
@@ -2662,6 +2662,12 @@ class App(TkinterDnD.Tk):
     def batch_generate(self):
         if not self._ensure_template():
             return
+        if not self.output_dir.get().strip():
+            messagebox.showwarning(
+                "请先选择输出目录",
+                "还没有选择输出目录，程序不会再把签字表放到各数据源目录。\n\n"
+                "请点「输出目录」右侧的「浏览…」指定保存位置。")
+            return
         ready_items = [it for it in self.batch_items if it in self.batch_info]
         if not ready_items:
             messagebox.showwarning("提示", "列表中没有可处理的文件。")
@@ -2849,8 +2855,8 @@ class App(TkinterDnD.Tk):
         out_dir = self.output_dir.get().strip()
         if out_dir:
             ttk.Button(
-                btns, text="打开输出目录",
-                command=lambda: (top.destroy(), os.startfile(out_dir))
+                btns, text="打开文件夹",
+                command=lambda: (top.destroy(), self._safe_start(out_dir))
             ).pack(side="right", padx=(0, px(8)))
         ttk.Button(btns, text="导出汇总报告",
                    command=lambda: (top.destroy(), self._export_batch_summary())
@@ -3361,14 +3367,20 @@ class App(TkinterDnD.Tk):
         finally:
             self.status.config(text="就绪")
         if fail:
-            messagebox.showwarning(
-                "完成（有失败）",
-                f"成功转换 {ok} 个文件。\n\n以下文件转换失败：\n"
-                + "\n".join(fail)
-                + "\n\n请确认添加的是「证书/表扬信提取」生成的三列结果 Excel。")
+            self._show_done(
+                "转换完成（有失败）", "部分文件未能转换",
+                [f"成功转换 {ok} 个文件。", "以下文件转换失败：",
+                 "\n".join(fail),
+                 "请确认添加的是「证书/表扬信提取」生成的三列结果 Excel。"],
+                [("确定", lambda t: t.destroy(), True),
+                 ("打开文件夹", lambda t: self._safe_start(out_dir, t), False)],
+                icon="!")
         else:
-            messagebox.showinfo(
-                "完成", f"已成功转换 {ok} 个文件（文件名加“_句式”）。")
+            self._show_done(
+                "转换完成", "句式版 Excel 已生成",
+                [f"已成功转换 {ok} 个文件（文件名加“_句式”）。", out_dir],
+                [("确定", lambda t: t.destroy(), True),
+                 ("打开文件夹", lambda t: self._safe_start(out_dir, t), False)])
 
     # ---------- 生成 ----------
     def generate(self):
@@ -3378,6 +3390,12 @@ class App(TkinterDnD.Tk):
             output = self.output_path.get()
             if not excel or not os.path.exists(excel):
                 messagebox.showwarning("提示", "请先选择有效的 Excel 文件。")
+                return
+            if not self.output_dir.get().strip():
+                messagebox.showwarning(
+                    "请先选择输出目录",
+                    "还没有选择输出目录，程序不会再把签字表放到数据源目录。\n\n"
+                    "请点「输出目录」右侧的「浏览…」指定保存位置。")
                 return
             if not self._ensure_template():
                 return
@@ -3582,24 +3600,67 @@ class App(TkinterDnD.Tk):
         except Exception as ex:
             self._error(ex)
 
-    def _ask_open(self, output, n):
+    def _show_done(self, title, subtitle, lines, actions, icon="✅"):
+        """统一风格的完成弹窗：绿色横幅 + 白卡片 + 底部按钮。
+        lines：正文文本行；actions：[(文字, 回调(top), 是否主按钮)]，按左到右排列。"""
         top = tk.Toplevel(self)
-        top.title("生成成功")
+        top.withdraw()
+        top.title(title)
         top.transient(self)
+        top.configure(bg=CARD_BG)
+        top.resizable(False, False)
+        s = self._s
+
+        def px(v):
+            return int(round(v * s))
+
+        banner = tk.Frame(top, bg=SIDEBAR_BG, height=px(74))
+        banner.pack(fill="x")
+        banner.pack_propagate(False)
+        tk.Label(banner, text=icon, bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 20)).pack(side="left", padx=px(18))
+        btxt = tk.Frame(banner, bg=SIDEBAR_BG)
+        btxt.pack(side="left")
+        tk.Label(btxt, text=title, bg=SIDEBAR_BG, fg="#ffffff",
+                 font=(UI_FONT, 14, "bold")).pack(anchor="w")
+        if subtitle:
+            tk.Label(btxt, text=subtitle, bg=SIDEBAR_BG, fg="#bfe2d0",
+                     font=(UI_FONT, 9)).pack(anchor="w")
+
+        body = tk.Frame(top, bg=CARD_BG)
+        body.pack(fill="x", padx=px(20), pady=px(14))
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            fg = MUTED if i > 0 and len(str(line)) > 40 else INK
+            tk.Label(body, text=line, bg=CARD_BG, fg=fg, font=(UI_FONT, 10),
+                     justify="left", anchor="w", wraplength=px(460)).pack(
+                fill="x", pady=(0, px(6)))
+
+        btns = tk.Frame(body, bg=CARD_BG)
+        btns.pack(fill="x", pady=(px(10), 0))
+        for label, cb, primary in reversed(actions):
+            ttk.Button(btns, text=label,
+                       style="Accent.TButton" if primary else "TButton",
+                       command=lambda c=cb: c(top)).pack(
+                side="right", padx=(px(8), 0))
+
+        top.update_idletasks()
+        top.geometry(f"{px(480)}x{top.winfo_reqheight()}")
+        top.deiconify()
+        _center_top_on(self, top)
         top.grab_set()
-        top.geometry(f"360x150+{self.winfo_x()+200}+{self.winfo_y()+220}")
-        ttk.Label(top, text=f"已生成，共 {n} 人。").pack(pady=(24, 8))
-        btns = ttk.Frame(top)
-        btns.pack(pady=8)
-        ttk.Button(btns, text="打开文件",
-                   command=lambda: self._safe_start(output, top)).grid(
-            row=0, column=0, padx=8)
-        ttk.Button(btns, text="打开文件夹",
-                   command=lambda: self._safe_start(
-                       os.path.dirname(output), top)).grid(
-            row=0, column=1, padx=8)
-        ttk.Button(btns, text="关闭", command=top.destroy).grid(
-            row=0, column=2, padx=8)
+        top.lift()
+        return top
+
+    def _ask_open(self, output, n):
+        self._show_done(
+            "生成成功", "德育分签字表已生成",
+            [f"已生成，共 {n} 人。", output],
+            [("打开文件", lambda t: self._safe_start(output, t), False),
+             ("打开文件夹", lambda t: self._safe_start(
+                 os.path.dirname(output), t), False),
+             ("关闭", lambda t: t.destroy(), True)])
 
     def _extract_done_dialog(self, out, found_count, data_count, multi, missing,
                              failed=None, no_semester=None):

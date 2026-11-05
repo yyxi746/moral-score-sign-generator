@@ -11,7 +11,6 @@
 import os
 import sys
 import shutil
-import tempfile
 import traceback
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -551,10 +550,73 @@ def test_batch_analyze_threads():
             pass
 
 
+def test_output_dir_required():
+    """没选输出目录时，批量生成必须被拦下，不再默认放到数据源目录。"""
+    if os.environ.get("SKIP_GUI_TESTS"):
+        raise Skip("已设置 SKIP_GUI_TESTS，跳过图形测试")
+    try:
+        app = main.App()
+    except Exception as exc:
+        raise Skip(f"无图形环境：{exc}")
+
+    cfg_path = os.path.join(TMP, "gui_config3.json")
+    orig_cfg = main.config_file
+    warns = []
+    orig_warn = main.messagebox.showwarning
+    main.config_file = lambda: cfg_path
+    main.messagebox.showwarning = lambda *a, **k: warns.append(a[0] if a else "")
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"template_path": os.path.join(TMP, "template.docx"),
+                       "about_seen": True}, f, ensure_ascii=False)
+        app.withdraw()
+        app.output_dir.set("")
+        app.batch_generate()
+        truth("请先选择输出目录" in warns,
+              f"应提示先选输出目录，实际弹窗：{warns}")
+        truth(not getattr(app, "_gen_active", False), "不应开始生成")
+
+        # 完成弹窗：单文件页要带「打开文件 / 打开文件夹 / 关闭」三个按钮
+        top = app._show_done(
+            "生成成功", "测试",
+            ["已生成，共 3 人。", r"C:\temp\a.docx"],
+            [("打开文件", lambda t: None, False),
+             ("打开文件夹", lambda t: None, False),
+             ("关闭", lambda t: t.destroy(), True)])
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    t = c.cget("text")
+                    if t:
+                        texts.append(str(t))
+                except Exception:
+                    pass
+                walk(c)
+
+        walk(top)
+        for label in ("打开文件", "打开文件夹", "关闭"):
+            truth(label in texts, f"完成弹窗应包含「{label}」按钮")
+        top.destroy()
+    finally:
+        main.config_file = orig_cfg
+        main.messagebox.showwarning = orig_warn
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+
 # ---------------------------------------------------------------- 主流程
 def main_entry():
     global TMP
-    TMP = tempfile.mkdtemp(prefix="moral_test_")
+    # 用脚本目录下的固定工作目录，而不是系统临时目录：
+    # 某些受限环境（如沙箱）不允许往 %TEMP% 里写，放在项目内哪儿都能跑。
+    TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_test_work")
+    shutil.rmtree(TMP, ignore_errors=True)
+    os.makedirs(TMP, exist_ok=True)
     try:
         build_sample_xlsx(os.path.join(TMP, "sample.xlsx"))
         build_sample_template(os.path.join(TMP, "template.docx"))
@@ -599,6 +661,7 @@ def main_entry():
         print("\n=== 界面 / 线程调度（无图形环境时跳过）===")
         check("批量生成后台线程 + 同名自动错开", test_batch_threads)
         check("批量分析后台线程", test_batch_analyze_threads)
+        check("未选输出目录时拦截 + 完成弹窗按钮", test_output_dir_required)
 
         passed = sum(1 for _, ok, _ in RESULTS if ok)
         total = len(RESULTS)
