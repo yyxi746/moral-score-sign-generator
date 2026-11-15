@@ -494,6 +494,10 @@ def build_judge_sheet():
         ["戊", "基础分+70", 70, None, "\n".join(["表扬信"] * 4), None,
          None, None, None, None, 0, None, None, None, None,
          "=C9+F9-H9+K9-M9+O9"],
+        # 己：附加分里有认不出来的条目（献血），该行附加分不参与比对
+        ["己", "基础分+70", 70, None, None, 0,
+         None, None, None, None, 0, None, None, "10.3献血+0.5", 0.5,
+         "=C10+F10-H10+K10-M10+O10"],
     ]
     for r in rows:
         ws.append(r)
@@ -510,8 +514,24 @@ def test_judge_parse_rules():
     eq(judge_audit.activity_score("新闻报道+3\n新闻报道+3"), 5, "新闻报道封顶 5")
     eq(judge_audit.activity_score("新闻报道+3\n新闻报道+3\n校级证书+2"), 7,
        "新闻封顶 5 后，其余活动照计（5+2）")
+    eq(judge_audit.addon_score("文体委员+4\n英语四级证书+2\n青禾艺术团工作人员+5"), 7,
+       "附加分：职务取最高 5 + 证书 2")
+    eq(judge_audit.addon_score("班长+7\n团支书+9"), 9, "附加分：多个职务取最高")
+    eq(judge_audit.addon_score("英语四级证书+2\n计算机二级证书+2"), 4,
+       "附加分：证书累加")
+    eq(judge_audit.addon_score("班长+7\n神秘项+99"), 7, "附加分：认不出来的不计分")
+    eq(judge_audit.classify_addon("优秀志愿者证书+1"), "cert",
+       "带「证书」二字的按证书算，不算职务")
+    eq(judge_audit.addon_score("文体委员+4 英语四级证书+2 青禾艺术团工作人员+5"), 7,
+       "附加分：同一行用空格隔开也能拆开")
     eq(judge_audit.praise_count("\n".join(["x"] * 12)), 12, "按换行计封数")
     eq(judge_audit.praise_count("a\n\nb\n"), 2, "空行不计")
+    eq(judge_audit.praise_count(
+        "10.31军训表扬信+0.5\n10.28彩旗队表扬信+0.5" + " " * 30 +
+        "10.30彩旗队表扬信+0.5"), 3, "同一行用空格隔开的多条也要算封")
+    eq(judge_audit.praise_count(
+        "9.20 参加活动表扬信+0.5\n9.21 参加活动表扬信+0.5"), 2,
+       "单个空格不拆条")
 
 
 def test_judge_audit_and_fix():
@@ -524,7 +544,7 @@ def test_judge_audit_and_fix():
     wb = openpyxl.load_workbook(path, data_only=True)
     cols, rows, problems = judge_audit.audit_sheet(wb.active)
     wb.close()
-    eq(len(rows), 5, "学生数")
+    eq(len(rows), 6, "学生数")
     by = {r["name"]: r for r in rows}
 
     f_col = cols["groups"][0]["judge"]
@@ -535,6 +555,7 @@ def test_judge_audit_and_fix():
     eq(by["丙"]["expect"][f_col], 0.5, "丙：+0,5 计 0.5")
     eq(by["丁"]["expect"][o_col], 11, "丁：附加分 7+4")
     eq(by["戊"]["expect"][f_col], 2, "戊：4 封 = 2 分")
+    truth(by["己"].get("addon_unknown"), "己：应识别出未计入的「献血」条目")
 
     issues = judge_audit.collect_issues(rows)
     eq(len(issues), 2, f"应只有 2 处差异，实际：{issues}")
@@ -594,7 +615,7 @@ def test_audit_tab_batch():
 
         app.audit_tree.selection_set(app.audit_tree.get_children()[0])
         app._audit_show_detail()
-        eq(len(app.audit_detail.get_children()), 5, "明细应有 5 行")
+        eq(len(app.audit_detail.get_children()), 6, "明细应有 6 行")
 
         outdir = os.path.join(TMP, "audit_out")
         app.audit_output.set(outdir)

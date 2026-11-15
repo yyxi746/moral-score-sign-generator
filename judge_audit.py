@@ -6,7 +6,7 @@
   先计前一个月份段，再用剩余额度计后一个月份段。
 - 活动分：累加文本里所有「+数字」；含「新闻报道」的条目合计封顶 5 分，其余不封顶。
 - 各鉴定栏：F = 第一段活动分 + 第一段表扬信分；K = 第二段活动分 + 第二段表扬信分；
-  O = 附加分说明里所有分值之和。
+  O = 附加分：职务类取最高一项 + 证书/成果类累加，认不出来的条目不计分。
 - 总分 P 按表内公式 C+F-H+K-M+O 勾稽，只核对不修改。
 - 一键修正只写 F/K/O 三个单元格，另存为副本。
 """
@@ -19,6 +19,8 @@ import openpyxl
 POINT_RE = re.compile(r"[+＋]\s*(\d+(?:[.,，]\d+)?)")
 # 表头里的月份段：9-10月 / X-X月 / 3月
 MONTH_HEAD_RE = re.compile(r"(\d+\s*[-—~]\s*\d+\s*月|[Xx]\s*[-—~]\s*[Xx]\s*月|\d+\s*月)")
+# 单元格里两条记录之间只隔了一串空格（没有换行）时，用「2 个以上空格 + 日期开头」切开
+RECORD_SPLIT_RE = re.compile(r"[ \t\u3000]{2,}(?=\d{1,2}\s*[.．月])")
 
 PRAISE_PER = 0.5          # 每封表扬信的分值
 PRAISE_CAP_COUNT = 10     # 整学期封顶封数
@@ -42,11 +44,21 @@ def parse_points(text):
 
 
 def split_records(value):
-    """单元格按换行拆成条目；空行忽略。"""
+    """单元格按换行拆成条目；同一行里用一串空格隔开的第二条（以日期开头）也拆开。
+
+    有些表里两条表扬信之间只敲了一堆空格、没有换行，Excel 里看着是三行，
+    实际只有一个换行符；这里按「2 个以上空格 + 日期」切开，避免少算一封。
+    """
     if value is None:
         return []
     s = str(value).replace("\r\n", "\n").replace("\r", "\n")
-    return [line.strip() for line in s.split("\n") if line.strip()]
+    out = []
+    for line in s.split("\n"):
+        for part in RECORD_SPLIT_RE.split(line):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
 
 
 def activity_score(value):
@@ -64,6 +76,66 @@ def activity_score(value):
 def praise_count(value):
     """表扬信封数：按非空换行计。"""
     return len(split_records(value))
+
+
+# ---------------------------------------------------------------- 附加分
+# 证书 / 成果类：累加
+CERT_KEYS = ("证书", "四级", "六级", "计算机", "普通话", "教师资格", "论文", "专利",
+             "软著", "著作", "SCI", "sci", "驾驶证", "驾照", "技能证")
+# 职务类：只取最高一项
+JOB_KEYS = ("班长", "团支书", "团支部书记", "书记", "委员", "寝室长", "宿舍长", "楼长",
+            "部长", "副部", "主任", "体委", "主席", "会长", "社长", "队长", "组长",
+            "负责人", "干事", "成员", "队员", "助理", "记者", "艺术团", "志愿者",
+            "助班", "学生会", "工作人员", "管理员", "信息员", "晚签员", "通讯员",
+            "学委", "铁军", "任职")
+
+
+def classify_addon(text):
+    """判断一条附加分是「证书成果类」「职务类」还是认不出来。
+
+    先判证书：像「优秀志愿者证书」虽然含「志愿者」，仍按证书算。
+    """
+    s = str(text or "")
+    if any(k in s for k in CERT_KEYS):
+        return "cert"
+    if any(k in s for k in JOB_KEYS):
+        return "job"
+    return "unknown"
+
+
+def _split_by_points(text):
+    """按每个「+分值」切开，一条可能没有换行只隔了空格。"""
+    out, start = [], 0
+    for m in POINT_RE.finditer(text):
+        out.append(text[start:m.end()])
+        start = m.end()
+    tail = text[start:]
+    if tail.strip():
+        out.append(tail)
+    return [s.strip() for s in out if s.strip()]
+
+
+def addon_detail(value):
+    """拆开附加分说明，返回 [(类别, 分值, 原文)]。"""
+    out = []
+    for line in split_records(value):
+        for seg in _split_by_points(line):
+            pts = parse_points(seg)
+            if pts <= 0:
+                continue
+            out.append((classify_addon(seg), pts, seg))
+    return out
+
+
+def addon_score(value):
+    """附加分：职务类取最高一项，证书成果类累加，认不出来的不计分。"""
+    cert_total, jobs = 0.0, []
+    for kind, pts, _rec in addon_detail(value):
+        if kind == "cert":
+            cert_total += pts
+        elif kind == "job":
+            jobs.append(pts)
+    return round(cert_total + (max(jobs) if jobs else 0.0), 2)
 
 
 # ---------------------------------------------------------------- 列定位
@@ -208,8 +280,10 @@ def audit_sheet(ws, first_row=5):
                                 "used": used, "activity": act,
                                 "praise_score": praise_score})
 
-        add_val = parse_points(ws.cell(r, cols["add_desc"]).value) \
+        add_val = addon_score(ws.cell(r, cols["add_desc"]).value) \
             if cols["add_desc"] else 0.0
+        add_parts = addon_detail(ws.cell(r, cols["add_desc"]).value) \
+            if cols["add_desc"] else []
         if cols["add_judge"]:
             expect[cols["add_judge"]] = round(add_val, 2)
 
@@ -239,7 +313,9 @@ def audit_sheet(ws, first_row=5):
 
         rows.append({"name": name, "row": r, "current": current,
                      "expect": expect, "diff": diff,
-                     "praise": praise_info,
+                     "praise": praise_info, "addon": add_parts,
+                     "addon_col": cols["add_judge"],
+                     "addon_unknown": [t for k, _v, t in add_parts if k == "unknown"],
                      "total_ok": total_ok})
 
     return cols, rows, problems
@@ -251,11 +327,15 @@ def collect_issues(rows):
 
     规则：应得为 0 而单元格为空 → 视为正常（不报）；
     应得不为 0 而单元格为空 → 报「未填」；有值但不等 → 报「多计 / 少计」。
+    附加分里出现认不出来的条目时，该行的附加分不参与比对（避免把有效分值改没）。
     返回 [(row, col, current, expected, reason), ...]
     """
     issues = []
     for r in rows:
+        skip_col = r.get("addon_col") if r.get("addon_unknown") else None
         for c, exp in r["expect"].items():
+            if c == skip_col:
+                continue
             cur = r["current"].get(c)
             if cur is None:
                 if abs(exp) < EPS:

@@ -51,7 +51,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.13.0"
+APP_VERSION = "v1.13.2"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -3215,7 +3215,8 @@ class App(TkinterDnD.Tk):
                     show(r["current"].get(k_col)), show(r["expect"].get(k_col)),
                     show(r["current"].get(o_col)), show(r["expect"].get(o_col)),
                     {True: "一致", False: "不一致", None: "—"}[r["total_ok"]],
-                    "需修正" if r["row"] in bad_rows else "正确")
+                    "需修正" if r["row"] in bad_rows else (
+                        "正确（含未识别附加分）" if r.get("addon_unknown") else "正确"))
             self.audit_detail.insert(
                 "", "end", values=vals,
                 tags=("bad",) if r["row"] in bad_rows else ())
@@ -3250,7 +3251,8 @@ class App(TkinterDnD.Tk):
                         r["current"].get(k_col), r["expect"].get(k_col),
                         r["current"].get(o_col), r["expect"].get(o_col),
                         {True: "一致", False: "不一致", None: "—"}[r["total_ok"]],
-                        "需修正" if r["row"] in bad_rows else "正确",
+                        "需修正" if r["row"] in bad_rows else (
+                            "正确（含未识别附加分）" if r.get("addon_unknown") else "正确"),
                     ])
             from openpyxl.styles import Font
             from openpyxl.styles import PatternFill
