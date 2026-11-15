@@ -22,6 +22,7 @@ import time
 import openpyxl
 from docx import Document
 
+import judge_audit
 import main
 
 TMP = None
@@ -452,7 +453,164 @@ def test_process_one_excel_month_filter():
     eq(rows[2].cells[2].text, "2", "张三只统计 3-4月 后的表扬信条数")
 
 
+# ---------------------------------------------------------------- 鉴定栏核对
+def build_judge_sheet():
+    """构造一张用于鉴定栏校对的样本：含表扬信封顶、新闻报道封顶、逗号笔误、附加分、未填。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "大三上"
+    ws["A1"] = "2026-2027学年第一学期德育分评分统计"
+    ws.merge_cells("A1:P1")
+    ws["A2"] = "班级：农学24-1班"
+    for rng, text in (("A3:A4", "姓名"), ("B3:C3", "基础分"),
+                      ("D3:F3", "9-10月加分项"), ("G3:H3", "9-10月扣分项"),
+                      ("I3:K3", "X-X月加分项"), ("L3:M3", "X-X月扣分项"),
+                      ("N3:O3", "附加分"), ("P3:P4", "总分")):
+        ws[rng.split(":")[0]] = text
+        ws.merge_cells(rng)
+    for c, t in (("C4", "鉴定"), ("D4", "9-10月"), ("E4", "表扬信"), ("F4", "鉴定"),
+                 ("G4", "鉴定"), ("H4", "鉴定"), ("I4", "X-X月"), ("J4", "表扬信"),
+                 ("K4", "鉴定"), ("L4", "鉴定"), ("M4", "鉴定"), ("O4", "鉴定")):
+        ws[c] = t
+
+    rows = [
+        # 甲：第一段 12 封（封顶 10 封=5 分），第二段 3 封额度已用完；F 现值 2.5 应为 7.5
+        ["甲", "基础分+70", 70, "校级证书+2.5", "\n".join(["表扬信"] * 12), 2.5,
+         None, None, None, "\n".join(["表扬信"] * 3), 0, None, None, None, None,
+         "=C5+F5-H5+K5-M5+O5"],
+        # 乙：两条新闻报道各 3 分 → 封顶 5，F 现值正确
+        ["乙", "基础分+70", 70, "新闻报道+3\n新闻报道+3", None, 5,
+         None, None, None, None, 0, None, None, None, None,
+         "=C6+F6-H6+K6-M6+O6"],
+        # 丙：逗号笔误 +0,5，一封 0.5
+        ["丙", "基础分+70", 70, None, "参加活动表扬信+0,5", 0.5,
+         None, None, None, None, 0, None, None, None, None,
+         "=C7+F7-H7+K7-M7+O7"],
+        # 丁：附加分说明里两个分值
+        ["丁", "基础分+70", 70, None, None, 0,
+         None, None, None, None, 0, None, None, "班长+7 六级证书+4", 11,
+         "=C8+F8-H8+K8-M8+O8"],
+        # 戊：鉴定栏空着但应有 4 封表扬信 × 0.5 = 2
+        ["戊", "基础分+70", 70, None, "\n".join(["表扬信"] * 4), None,
+         None, None, None, None, 0, None, None, None, None,
+         "=C9+F9-H9+K9-M9+O9"],
+    ]
+    for r in rows:
+        ws.append(r)
+    return wb, ws
+
+
+def test_judge_parse_rules():
+    """分值解析：普通加分、新闻报道封顶、逗号笔误、封数统计。"""
+    eq(judge_audit.parse_points("班长+7 六级证书+4"), 11, "两个分值累加")
+    eq(judge_audit.parse_points("参加活动+0,5"), 0.5, "半角逗号小数")
+    eq(judge_audit.parse_points("参加活动+0，5"), 0.5, "全角逗号小数")
+    eq(judge_audit.parse_points("上限五分"), 0, "没有 + 数字时不计分")
+    eq(judge_audit.activity_score("校级证书+2.5\n校级证书+2.5"), 5, "普通活动不封顶")
+    eq(judge_audit.activity_score("新闻报道+3\n新闻报道+3"), 5, "新闻报道封顶 5")
+    eq(judge_audit.activity_score("新闻报道+3\n新闻报道+3\n校级证书+2"), 7,
+       "新闻封顶 5 后，其余活动照计（5+2）")
+    eq(judge_audit.praise_count("\n".join(["x"] * 12)), 12, "按换行计封数")
+    eq(judge_audit.praise_count("a\n\nb\n"), 2, "空行不计")
+
+
+def test_judge_audit_and_fix():
+    """整表核对：表扬信学期封顶、未填报错、附加分、修正后归零。"""
+    wb, ws = build_judge_sheet()
+    path = os.path.join(TMP, "鉴定栏样本.xlsx")
+    wb.save(path)
+    wb.close()
+
+    wb = openpyxl.load_workbook(path, data_only=True)
+    cols, rows, problems = judge_audit.audit_sheet(wb.active)
+    wb.close()
+    eq(len(rows), 5, "学生数")
+    by = {r["name"]: r for r in rows}
+
+    f_col = cols["groups"][0]["judge"]
+    k_col = cols["groups"][1]["judge"] if len(cols["groups"]) > 1 else None
+    o_col = cols["add_judge"]
+    eq(by["甲"]["expect"][f_col], 7.5, "甲：2.5 活动 + 封顶 5 分表扬信")
+    eq(by["乙"]["expect"][f_col], 5, "乙：新闻报道封顶 5")
+    eq(by["丙"]["expect"][f_col], 0.5, "丙：+0,5 计 0.5")
+    eq(by["丁"]["expect"][o_col], 11, "丁：附加分 7+4")
+    eq(by["戊"]["expect"][f_col], 2, "戊：4 封 = 2 分")
+
+    issues = judge_audit.collect_issues(rows)
+    eq(len(issues), 2, f"应只有 2 处差异，实际：{issues}")
+    reasons = {by_row["name"]: reason for by_row in rows
+               for (row, _c, _cur, _exp, reason) in issues
+               if row == by_row["row"]}
+    truth("甲" in reasons and "少计" in reasons["甲"], "甲的差异应提示少计")
+    truth("戊" in reasons and "未填" in reasons["戊"], "戊的差异应提示未填")
+
+    dst = os.path.join(TMP, "鉴定栏样本_已修正.xlsx")
+    judge_audit.apply_fixes(path, dst, [(r, c, exp) for r, c, _cur, exp, _ in issues])
+    wb = openpyxl.load_workbook(dst, data_only=True)
+    cols2, rows2, _ = judge_audit.audit_sheet(wb.active)
+    wb.close()
+    eq(len(judge_audit.collect_issues(rows2)), 0, "修正后不应再有差异")
+
+
 # ---------------------------------------------------------------- 界面（线程调度）
+def test_audit_tab_batch():
+    """鉴定栏核对页：多文件去重、批量检查、明细联动、按输出目录批量修正。"""
+    if os.environ.get("SKIP_GUI_TESTS"):
+        raise Skip("已设置 SKIP_GUI_TESTS，跳过图形测试")
+    try:
+        app = main.App()
+    except Exception as exc:
+        raise Skip(f"无图形环境：{exc}")
+
+    cfg_path = os.path.join(TMP, "gui_config_audit.json")
+    orig_cfg = main.config_file
+    orig_mb = (main.messagebox.askyesno, main.messagebox.showinfo,
+               main.messagebox.showwarning)
+    main.config_file = lambda: cfg_path
+    main.messagebox.askyesno = lambda *a, **k: True
+    main.messagebox.showinfo = lambda *a, **k: None
+    main.messagebox.showwarning = lambda *a, **k: None
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"about_seen": True}, f, ensure_ascii=False)
+        app.withdraw()
+        app._switch_tab("audit")
+
+        wb, _ws = build_judge_sheet()
+        p1 = os.path.join(TMP, "核对甲.xlsx")
+        wb.save(p1)
+        wb.close()
+        p2 = os.path.join(TMP, "核对乙.xlsx")
+        shutil.copy(p1, p2)
+
+        app._audit_add_files([p1, p2, p1])       # 第三个是重复的
+        eq(len(app.audit_tree.get_children()), 2, "重复文件应去重")
+
+        app.audit_run_all()
+        vals = [app.audit_tree.item(i, "values")
+                for i in app.audit_tree.get_children()]
+        eq(len(vals), 2, "两个文件都应检查")
+        truth(all(v[2] == "2" for v in vals), f"每个文件应有 2 处差异：{vals}")
+
+        app.audit_tree.selection_set(app.audit_tree.get_children()[0])
+        app._audit_show_detail()
+        eq(len(app.audit_detail.get_children()), 5, "明细应有 5 行")
+
+        outdir = os.path.join(TMP, "audit_out")
+        app.audit_output.set(outdir)
+        app.audit_fix()
+        made = [f for f in os.listdir(outdir) if f.endswith("_已修正.xlsx")]
+        eq(len(made), 2, f"应生成 2 个已修正文件，实际：{made}")
+    finally:
+        main.config_file = orig_cfg
+        (main.messagebox.askyesno, main.messagebox.showinfo,
+         main.messagebox.showwarning) = orig_mb
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
 def test_batch_threads():
     """批量生成走后台线程 + 结果队列：两个同名源文件应各自成功并自动错开文件名。
     需要图形环境；CI 上通过 SKIP_GUI_TESTS=1 跳过。"""
@@ -657,6 +815,11 @@ def main_entry():
 
         print("\n=== 配置 ===")
         check("配置读写往返", test_config_roundtrip)
+
+        print("\n=== 鉴定栏核对 ===")
+        check("分值解析（新闻报道封顶 / 逗号笔误）", test_judge_parse_rules)
+        check("整表核对与一键修正", test_judge_audit_and_fix)
+        check("鉴定栏页：多文件批量核对与修正", test_audit_tab_batch)
 
         print("\n=== 界面 / 线程调度（无图形环境时跳过）===")
         check("批量生成后台线程 + 同名自动错开", test_batch_threads)

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 德育分签字表生成器
 - 不写死文件名 / 工作表 / 表头名 / 列位置 / 人数，通用适配。
@@ -24,6 +24,8 @@ import webbrowser
 import urllib.request
 
 import openpyxl
+
+import judge_audit
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 from zipfile import BadZipFile
@@ -49,7 +51,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.12.6"
+APP_VERSION = "v1.13.0"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -1481,6 +1483,12 @@ class App(TkinterDnD.Tk):
         self._gen_cancel = False
         self._gen_path_map = {}
 
+        # 鉴定栏核对状态
+        self.audit_output = tk.StringVar(value=cfg.get("audit_output", ""))
+        self.audit_files = {}      # tree item -> 文件路径
+        self.audit_path_set = set()  # 已加入文件去重
+        self.audit_info = {}       # tree item -> 核对结果
+
         # 证书 / 表扬信提取状态
         self.ext_items = {}        # tree item -> 文件路径
         self.ext_path_set = set()  # 已加入文件去重
@@ -1836,6 +1844,7 @@ class App(TkinterDnD.Tk):
         for key, icon, text in (
                 ("single", "📄", "单文件处理"),
                 ("batch", "📚", "批量处理"),
+                ("audit", "🧮", "鉴定栏核对"),
                 ("extract", "🏅", "证书/表扬信提取"),
                 ("sentence", "🔤", "句子形式转换")):
             item = tk.Frame(navwrap, bg=SIDEBAR_BG, cursor="hand2")
@@ -1892,6 +1901,7 @@ class App(TkinterDnD.Tk):
         for key, title, desc in (
                 ("single", "单文件处理", "从一个德育分统计表生成 Word 签字表，生成前可核对预览。"),
                 ("batch", "批量处理", "一次添加多个班级 / 学期统计表，批量生成签字表。"),
+                ("audit", "鉴定栏核对", "按规则重算鉴定栏分数，列出差异并一键修正。"),
                 ("extract", "证书 / 表扬信提取", "按名单从多张统计表跨月合并提取证书、表扬信。"),
                 ("sentence", "句子形式转换", "把提取结果转成「荣获 / 参与」完整句子。")):
             page = tk.Frame(content, bg=PAGE_BG)
@@ -1914,12 +1924,15 @@ class App(TkinterDnD.Tk):
 
         root = self._cards["single"]
         batch = self._cards["batch"]
+        audit = self._cards["audit"]
         extract = self._cards["extract"]
         sentence = self._cards["sentence"]
         self.batch_tab = self._pages["batch"]
+        self.audit_tab = self._pages["audit"]
         self.extract_tab = self._pages["extract"]
         self.sentence_tab = self._pages["sentence"]
         self._build_batch_tab(batch)
+        self._build_audit_tab(audit)
         self._build_extract_tab(extract)
         self._build_sentence_tab(sentence)
 
@@ -2228,6 +2241,7 @@ class App(TkinterDnD.Tk):
                           "output_dir": self.output_dir.get().strip(),
                           "ext_output": self.ext_output.get().strip(),
                           "sent_output": self.sent_output.get().strip(),
+                          "audit_output": self.audit_output.get().strip(),
                           "skip_version": getattr(self, "_skip_version", ""),
                           "about_seen": bool(getattr(self, "_about_seen", False))})
         if not ok:
@@ -2960,6 +2974,366 @@ class App(TkinterDnD.Tk):
     def _on_drop_batch(self, event):
         files = self._parse_drop_paths(event.data)
         self._batch_add_files(files)
+
+    # ---------- 鉴定栏核对页 ----------
+    def _build_audit_tab(self, parent):
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=8, pady=8)
+
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="添加文件",
+                   command=self.audit_browse_files).pack(side="left", padx=4)
+        ttk.Button(bar, text="添加文件夹",
+                   command=self.audit_browse_folder).pack(side="left", padx=4)
+        ttk.Button(bar, text="移除选中",
+                   command=self.audit_remove).pack(side="left", padx=4)
+        ttk.Button(bar, text="清空列表",
+                   command=self.audit_clear).pack(side="left", padx=4)
+
+        list_frame = ttk.LabelFrame(
+            outer, text="要核对的统计表（可直接把 Excel 文件或文件夹拖入）")
+        list_frame.pack(fill="both", expand=True, pady=6)
+        self.audit_placeholder = ttk.Label(
+            list_frame, text="把 Excel 拖到这里，或点上方「添加文件」",
+            foreground="gray")
+        self.audit_placeholder.pack(side="top", fill="x", padx=6, pady=(6, 0))
+        cols = ("file", "count", "diff", "status")
+        self.audit_tree = ttk.Treeview(list_frame, columns=cols,
+                                       show="headings", height=5)
+        for c, head, w, anchor in (("file", "文件名", 420, "w"),
+                                   ("count", "人数", 70, "center"),
+                                   ("diff", "差异", 70, "center"),
+                                   ("status", "状态", 220, "w")):
+            self.audit_tree.heading(c, text=head)
+            self.audit_tree.column(c, width=w, anchor=anchor)
+        self.audit_tree.tag_configure("bad", background="#fdecec")
+        self.audit_tree.tag_configure("error", background="#fdecec")
+        sb = ttk.Scrollbar(list_frame, orient="vertical",
+                           command=self.audit_tree.yview)
+        self.audit_tree.configure(yscrollcommand=sb.set)
+        self.audit_tree.pack(side="left", fill="both", expand=True,
+                             padx=(6, 0), pady=6)
+        sb.pack(side="right", fill="y", pady=6)
+        self.audit_tree.bind("<<TreeviewSelect>>",
+                             lambda e: self._audit_show_detail())
+
+        out_frame = ttk.Frame(outer)
+        out_frame.pack(fill="x", pady=(2, 0))
+        ttk.Label(out_frame, text="输出目录：").grid(
+            row=0, column=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(out_frame, textvariable=self.audit_output).grid(
+            row=0, column=1, columnspan=2, sticky="we", padx=4)
+        ttk.Button(out_frame, text="浏览…",
+                   command=self.audit_browse_output).grid(row=0, column=3, padx=4)
+        ttk.Button(out_frame, text="清除",
+                   command=lambda: self.audit_output.set("")).grid(
+            row=0, column=4, padx=4)
+        ttk.Label(out_frame, text="（必选：一键修正的结果存放在这里，原文件不动）",
+                  foreground="gray").grid(row=1, column=1, columnspan=3,
+                                          sticky="w", padx=4)
+        out_frame.columnconfigure(1, weight=1)
+
+        btns = ttk.Frame(outer)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns, text="检查全部",
+                   command=self.audit_run_all).pack(side="left", padx=4)
+        ttk.Button(btns, text="导出核对表",
+                   command=self.audit_export).pack(side="left", padx=4)
+        ttk.Button(btns, text="一键自动修正", style="Accent.TButton",
+                   command=self.audit_fix).pack(side="left", padx=4)
+
+        detail_frame = ttk.LabelFrame(outer, text="学生明细（选中上方文件后显示）")
+        detail_frame.pack(fill="both", expand=True, pady=6)
+        dcols = ("name", "f", "fe", "k", "ke", "o", "oe", "total", "status")
+        dheads = {"name": "姓名", "f": "第一段现值", "fe": "第一段应得",
+                  "k": "第二段现值", "ke": "第二段应得",
+                  "o": "附加分现值", "oe": "附加分应得",
+                  "total": "总分勾稽", "status": "结果"}
+        dwidth = {"name": 110, "f": 88, "fe": 88, "k": 88, "ke": 88,
+                  "o": 88, "oe": 88, "total": 84, "status": 120}
+        self.audit_detail = ttk.Treeview(detail_frame, columns=dcols,
+                                         show="headings", height=8)
+        for c in dcols:
+            self.audit_detail.heading(c, text=dheads[c])
+            self.audit_detail.column(
+                c, width=dwidth[c], anchor="w" if c == "name" else "center")
+        self.audit_detail.tag_configure("bad", background="#fdecec")
+        dsb = ttk.Scrollbar(detail_frame, orient="vertical",
+                            command=self.audit_detail.yview)
+        self.audit_detail.configure(yscrollcommand=dsb.set)
+        self.audit_detail.pack(side="left", fill="both", expand=True,
+                               padx=(6, 0), pady=6)
+        dsb.pack(side="right", fill="y", pady=6)
+
+        register_drop_recursive(parent, self._on_drop_audit)
+
+    # ---- 文件列表 ----
+    def audit_browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="选择德育分统计表（可多选）",
+            filetypes=[("Excel 文件", "*.xlsx *.xlsm"), ("所有文件", "*.*")])
+        if paths:
+            self._audit_add_files(list(paths))
+
+    def audit_browse_folder(self):
+        d = filedialog.askdirectory(title="选择包含统计表的文件夹（自动递归）")
+        if d:
+            self._audit_add_files(collect_excels(d))
+
+    def _audit_add_files(self, files):
+        added = 0
+        for f in files:
+            f = os.path.normpath(f)
+            if f in self.audit_path_set:
+                continue
+            self.audit_path_set.add(f)
+            item = self.audit_tree.insert(
+                "", "end",
+                values=(os.path.basename(f), "-", "-", "待检查"))
+            self.audit_files[item] = f
+            added += 1
+        self._refresh_placeholder(self.audit_tree, self.audit_placeholder)
+        if added:
+            self.status.config(text=f"已添加 {added} 个文件")
+
+    def audit_remove(self):
+        for sel in self.audit_tree.selection():
+            path = self.audit_files.pop(sel, None)
+            if path:
+                self.audit_path_set.discard(path)
+            self.audit_info.pop(sel, None)
+            self.audit_tree.delete(sel)
+        self._refresh_placeholder(self.audit_tree, self.audit_placeholder)
+        for i in self.audit_detail.get_children():
+            self.audit_detail.delete(i)
+
+    def audit_clear(self):
+        self.audit_files.clear()
+        self.audit_path_set.clear()
+        self.audit_info.clear()
+        for i in self.audit_tree.get_children():
+            self.audit_tree.delete(i)
+        for i in self.audit_detail.get_children():
+            self.audit_detail.delete(i)
+        self._refresh_placeholder(self.audit_tree, self.audit_placeholder)
+        self.status.config(text="列表已清空")
+
+    def _on_drop_audit(self, event):
+        files = self._parse_drop_paths(event.data)
+        if files:
+            self._audit_add_files(files)
+
+    def audit_browse_output(self):
+        first = ""
+        if self.audit_files:
+            first = os.path.dirname(next(iter(self.audit_files.values())))
+        d = filedialog.askdirectory(title="选择输出目录",
+                                    initialdir=first or None)
+        if d:
+            self.audit_output.set(d)
+            self._save_cfg()
+
+    # ---- 检查 ----
+    @staticmethod
+    def _audit_cols_of(cols):
+        """从列定位结果里取出 第一段/第二段/附加分 三个鉴定列。"""
+        groups = cols.get("groups") or []
+        f_col = groups[0]["judge"] if len(groups) >= 1 else None
+        k_col = groups[1]["judge"] if len(groups) >= 2 else None
+        return f_col, k_col, cols.get("add_judge")
+
+    def audit_run_all(self):
+        if not self.audit_files:
+            messagebox.showwarning("提示", "请先添加要核对的统计表。")
+            return
+        self.audit_info.clear()
+        for i in self.audit_detail.get_children():
+            self.audit_detail.delete(i)
+        total_issues = 0
+        failed = []
+        for item, path in list(self.audit_files.items()):
+            name = os.path.basename(path)
+            try:
+                wb = load_workbook_checked(path, data_only=True)
+                try:
+                    cols, rows, problems = judge_audit.audit_sheet(wb.active)
+                finally:
+                    wb.close()
+                issues = judge_audit.collect_issues(rows)
+                self.audit_info[item] = {"path": path, "cols": cols,
+                                         "rows": rows, "issues": issues,
+                                         "problems": problems}
+                total_issues += len(issues)
+                status = f"需修正 {len(issues)} 处" if issues else "正确"
+                if problems:
+                    status += "（" + "；".join(problems) + "）"
+                self.audit_tree.item(
+                    item, values=(name, len(rows), len(issues), status),
+                    tags=("bad",) if issues else ())
+            except Exception as ex:
+                failed.append(f"{name}：{ex}")
+                self.audit_tree.item(
+                    item, values=(name, "-", "-", f"失败：{ex}"),
+                    tags=("error",))
+            self.update_idletasks()
+
+        self.status.config(
+            text=f"{len(self.audit_files)} 个文件，共 {total_issues} 处差异"
+                 + (f"，{len(failed)} 个失败" if failed else ""))
+        if failed:
+            messagebox.showwarning(
+                "部分文件无法核对",
+                "\n".join(failed[:6]) + ("\n…" if len(failed) > 6 else ""))
+        # 自动选中第一个有差异的文件，方便直接看明细
+        for item in self.audit_tree.get_children():
+            info = self.audit_info.get(item)
+            if info and info["issues"]:
+                self.audit_tree.selection_set(item)
+                self.audit_tree.focus(item)
+                self._audit_show_detail()
+                break
+
+    def _audit_show_detail(self, event=None):
+        sel = self.audit_tree.selection()
+        if not sel:
+            return
+        info = self.audit_info.get(sel[0])
+        for i in self.audit_detail.get_children():
+            self.audit_detail.delete(i)
+        if not info:
+            return
+        f_col, k_col, o_col = self._audit_cols_of(info["cols"])
+        bad_rows = {row for row, _c, _cur, _exp, _r in info["issues"]}
+
+        def show(v):
+            return "0" if v is None else f"{v:g}"
+
+        for r in info["rows"]:
+            vals = (r["name"],
+                    show(r["current"].get(f_col)), show(r["expect"].get(f_col)),
+                    show(r["current"].get(k_col)), show(r["expect"].get(k_col)),
+                    show(r["current"].get(o_col)), show(r["expect"].get(o_col)),
+                    {True: "一致", False: "不一致", None: "—"}[r["total_ok"]],
+                    "需修正" if r["row"] in bad_rows else "正确")
+            self.audit_detail.insert(
+                "", "end", values=vals,
+                tags=("bad",) if r["row"] in bad_rows else ())
+
+    # ---- 导出核对表 ----
+    def audit_export(self):
+        if not self.audit_info:
+            messagebox.showwarning("提示", "请先点「检查全部」。")
+            return
+        first = next(iter(self.audit_files.values()))
+        target = filedialog.asksaveasfilename(
+            title="保存核对表", defaultextension=".xlsx",
+            initialdir=os.path.dirname(first), initialfile="鉴定栏核对表.xlsx",
+            filetypes=[("Excel 文件", "*.xlsx")])
+        if not target:
+            return
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "核对表"
+            ws.append(["文件名", "姓名", "第一段现值", "第一段应得",
+                       "第二段现值", "第二段应得", "附加分现值", "附加分应得",
+                       "总分勾稽", "结论"])
+            for item, info in self.audit_info.items():
+                f_col, k_col, o_col = self._audit_cols_of(info["cols"])
+                bad_rows = {row for row, _c, _cur, _exp, _r in info["issues"]}
+                fname = os.path.basename(info["path"])
+                for r in info["rows"]:
+                    ws.append([
+                        fname, r["name"],
+                        r["current"].get(f_col), r["expect"].get(f_col),
+                        r["current"].get(k_col), r["expect"].get(k_col),
+                        r["current"].get(o_col), r["expect"].get(o_col),
+                        {True: "一致", False: "不一致", None: "—"}[r["total_ok"]],
+                        "需修正" if r["row"] in bad_rows else "正确",
+                    ])
+            from openpyxl.styles import Font
+            from openpyxl.styles import PatternFill
+            head_fill = PatternFill("solid", fgColor="DDEBF7")
+            bad_fill = PatternFill("solid", fgColor="FCE4D6")
+            for c in range(1, 11):
+                cell = ws.cell(1, c)
+                cell.font = Font(bold=True)
+                cell.fill = head_fill
+            for row in range(2, ws.max_row + 1):
+                if ws.cell(row, 10).value == "需修正":
+                    for c in range(1, 11):
+                        ws.cell(row, c).fill = bad_fill
+            ws.freeze_panes = "A2"
+            for i, w in enumerate([34, 12, 12, 12, 12, 12, 12, 12, 10, 10],
+                                  start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+            wb.save(target)
+            wb.close()
+        except Exception as ex:
+            self._error(ex)
+            return
+        self.status.config(text=f"核对表已导出：{target}")
+        messagebox.showinfo("完成", f"核对表已保存到：\n{target}")
+
+    # ---- 一键修正 ----
+    def audit_fix(self):
+        if not self.audit_info:
+            messagebox.showwarning("提示", "请先点「检查全部」。")
+            return
+        out_dir = self.audit_output.get().strip()
+        if not out_dir:
+            messagebox.showwarning(
+                "请先选择输出目录",
+                "还没有选择输出目录，修正后的文件不知道该放哪。\n\n"
+                "请点「输出目录」右侧的「浏览…」指定位置。")
+            return
+        todo = [(item, info) for item, info in self.audit_info.items()
+                if info["issues"]]
+        if not todo:
+            messagebox.showinfo("无需修正", "所有文件的鉴定栏分数都与规则一致。")
+            return
+        cells = sum(len(info["issues"]) for _item, info in todo)
+        if not messagebox.askyesno(
+                "确认修正",
+                f"{len(todo)} 个文件、共 {cells} 个单元格需要修正。\n\n"
+                f"修正后的文件会另存到：\n{out_dir}\n\n原文件不会被改动，是否继续？"):
+            return
+        if not os.path.isdir(out_dir):
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as ex:
+                self._error(ex)
+                return
+
+        done, failed = 0, []
+        for item, info in todo:
+            src = info["path"]
+            stem, ext = os.path.splitext(os.path.basename(src))
+            dst = unique_path_on_disk(
+                os.path.join(out_dir, stem + "_已修正" + (ext or ".xlsx")))
+            try:
+                judge_audit.apply_fixes(
+                    src, dst,
+                    [(row, col, exp) for row, col, _cur, exp, _r in info["issues"]])
+                done += 1
+            except Exception as ex:
+                failed.append(f"{stem}：{ex}")
+            self.update_idletasks()
+
+        self.status.config(
+            text=f"已修正 {done} 个文件，共 {cells} 处"
+                 + (f"，{len(failed)} 个失败" if failed else ""))
+        self._save_cfg()
+        if failed:
+            messagebox.showwarning(
+                "部分文件修正失败",
+                "\n".join(failed[:6]) + ("\n…" if len(failed) > 6 else ""))
+        self._show_done(
+            "修正完成", "鉴定栏分数已按规则改正",
+            [f"共 {done} 个文件、{cells} 处。", out_dir],
+            [("关闭", lambda t: t.destroy(), True),
+             ("打开文件夹", lambda t: self._safe_start(out_dir, t), False)])
 
     # ---------- 证书 / 表扬信提取页 ----------
     def _build_extract_tab(self, parent):
