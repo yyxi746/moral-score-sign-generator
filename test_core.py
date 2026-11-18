@@ -617,6 +617,18 @@ def test_audit_tab_batch():
         app._audit_show_detail()
         eq(len(app.audit_detail.get_children()), 6, "明细应有 6 行")
 
+        # 错误要高亮：红底加粗标签 + 结论条写明要改哪些文件
+        bad_detail = [i for i in app.audit_detail.get_children()
+                      if "bad" in app.audit_detail.item(i, "tags")]
+        eq(len(bad_detail), 2, "明细里应有 2 行标红")
+        bad_files = [i for i in app.audit_tree.get_children()
+                     if "bad" in app.audit_tree.item(i, "tags")]
+        eq(len(bad_files), 2, "列表里应有 2 个文件标红")
+        summary = app.audit_summary.cget("text")
+        truth("需要修正" in summary, f"结论条应提示需要修正：{summary}")
+        first_bad = app.audit_detail.item(bad_detail[0], "values")
+        truth("→" in first_bad[-1], f"结果列应写明改什么：{first_bad[-1]}")
+
         outdir = os.path.join(TMP, "audit_out")
         app.audit_output.set(outdir)
         app.audit_fix()
