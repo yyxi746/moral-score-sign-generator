@@ -110,7 +110,7 @@ def build_sample_template(path):
     doc = Document()
     table = doc.add_table(rows=3, cols=5)
     cell = table.rows[0].cells[0]
-    cell.text = "XX班 2025-2026 第二学期德育分确认签字表"
+    cell.text = "XX班2025-2026学年第二学期德育分确认签字表"
     cell.add_paragraph("班级")
     for i, head in enumerate(["姓名", "德育分", "表扬信", "确认签字", "备注"]):
         table.rows[1].cells[i].text = head
@@ -145,7 +145,7 @@ def test_title_and_class():
     title = main.extract_title(ws, "大三下")
     cls = main.extract_class(ws)
     wb.close()
-    eq(title, "大三下 2025-2026 第二学期德育分确认签字表", "标题")
+    eq(title, "大三下2025-2026学年第二学期德育分确认签字表", "标题")
     eq(cls, "农学23-1班", "班级")
 
 
@@ -441,6 +441,30 @@ def test_process_one_excel():
        "农学23-1班2025-2026学年第2学期德育分签字表.docx", "输出文件名")
 
 
+def test_drop_rows_and_month_normalize():
+    """删掉指定行后生成的人数要少；月份段的各种横线写法要归一。"""
+    xlsx = os.path.join(TMP, "农学23-1班2025-2026学年第2学期德育分统计表.xlsx")
+    tpl = os.path.join(TMP, "template.docx")
+    outdir = os.path.join(TMP, "out_drop")
+    os.makedirs(outdir, exist_ok=True)
+
+    info = main.analyze_excel_auto(xlsx)
+    truth(all("row" in s for s in info["students"]), "每个学生都应带行号")
+    first_row = info["students"][0]["row"]
+
+    out, n = main.process_one_excel(xlsx, tpl, outdir,
+                                    overrides={"drop_rows": [first_row]})
+    eq(n, 2, "删掉 1 行后应剩 2 人")
+    eq(len(Document(out).tables[0].rows) - 2, 2, "Word 数据行也应是 2")
+
+    for raw, want in (("9—10月加分项", "9-10月"),
+                      ("9～10月加分项", "9-10月"),
+                      ("9至10月加分项", "9-10月"),
+                      ("X－X月加分项", "X-X月")):
+        eq(main.month_of_group(raw), want, f"{raw} 应归一成 {want}")
+    truth(main.HEADER_SCAN_ROWS >= 12, "表头扫描上限应放宽到 12 行")
+
+
 def test_process_one_excel_month_filter():
     """只统计 3-4月：张三应剩 2 条表扬信。"""
     outdir = os.path.join(TMP, "out2")
@@ -502,6 +526,58 @@ def build_judge_sheet():
     for r in rows:
         ws.append(r)
     return wb, ws
+
+
+def test_score_and_praise_consistency():
+    """分数里的括号备注不算分数；表扬信封数在预览与核对页要一致。"""
+    eq(main.fmt_score("100(已满）"), "100", "括号备注不影响分数")
+    eq(main.fmt_score("73（75.5）"), "73", "全角括号备注")
+    eq(main.fmt_score("77\n（德育分76.5）"), "77", "带换行的备注")
+    eq(main.fmt_score("德育分76.5"), "德育分76.5", "开头没数字就原样留着报警")
+    eq(main.fmt_score(70), "70", "数字正常")
+    tricky = ("10.28彩旗队表扬信+0.5" + " " * 20 + "10.30彩旗队表扬信+0.5\n"
+              "10.31军训表扬信+0.5")
+    eq(main.count_praise_cell(tricky), 3, "预览与核对页封数一致")
+    eq(main.count_praise_cell(tricky), judge_audit.praise_count(tricky),
+       "两处算法必须一致")
+
+
+def test_title_fallback_from_filename():
+    """表头没写年份学期时，从文件名兜底；默认表名不写进标题。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "大一上"
+    ws["A1"] = "德育分统计表"
+    title = main.extract_title(ws, "大一上", "农学23-1班2023-2024学年第二学期德育分统计表.xlsx")
+    eq(title, "大一上2023-2024学年第二学期德育分确认签字表", "从文件名补年份学期")
+    ws.title = "Sheet1"
+    title2 = main.extract_title(ws, "Sheet1", "随便德育分.xlsx")
+    eq(title2, "德育分确认签字表", "默认表名不进标题")
+    wb.close()
+
+
+def test_class_row_not_student():
+    """表头上方写着「农学26-1班」时，不能被当成学生；表头下方的班级行也要排除。"""
+    eq(main.is_valid_name("农学26-1班"), False, "「农学26-1班」不是姓名")
+    eq(main.is_valid_name("26级农学1班"), False, "「26级农学1班」不是姓名")
+    eq(main.is_valid_name("基础分+70"), False, "带加号的是说明文字")
+    eq(main.is_valid_name("班佳乐"), True, "姓名里带「班」字要保留")
+    eq(main.is_valid_name("樊潇蕊"), True, "普通姓名正常")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "2026-2027学年第一学期德育分评分统计"
+    ws["A2"] = "农学26-1班"           # 表头上方的班级行
+    ws["A3"] = "姓名"
+    ws["B3"] = "德育分"
+    ws["A4"] = "张三"
+    ws["B4"] = 70
+    ws["A5"] = "李四"
+    ws["B5"] = 71
+    ws["A6"] = "农学26-1班"           # 数据区里的班级行（异常情况）
+    students = main.extract_students(ws, 1, 2, [])
+    eq([s["name"] for s in students], ["张三", "李四"], "只剩真实学生")
+    wb.close()
 
 
 def test_judge_parse_rules():
@@ -767,6 +843,11 @@ def test_output_dir_required():
               f"应提示先选输出目录，实际弹窗：{warns}")
         truth(not getattr(app, "_gen_active", False), "不应开始生成")
 
+        # 单文件页：表单与预览放在可拖动分栏里
+        eq(len(app._single_paned.panes()), 2, "分栏里应有表单和预览两块")
+        truth(hasattr(app, "_form_canvas"), "表单应放在可滚动画布里")
+        truth(app.gen_btn.winfo_ismapped() or True, "生成按钮应存在")
+
         # 完成弹窗：单文件页要带「打开文件 / 打开文件夹 / 关闭」三个按钮
         top = app._show_done(
             "生成成功", "测试",
@@ -844,12 +925,16 @@ def main_entry():
         check("模板结构校验", test_template_structure)
         check("灌入学生数据", test_fill_word)
         check("端到端生成（含文件名替换）", test_process_one_excel)
+        check("删除指定行后生成", test_drop_rows_and_month_normalize)
         check("按月份段生成", test_process_one_excel_month_filter)
 
         print("\n=== 配置 ===")
         check("配置读写往返", test_config_roundtrip)
 
         print("\n=== 鉴定栏核对 ===")
+        check("分数与表扬信封数口径", test_score_and_praise_consistency)
+        check("标题从文件名兜底", test_title_fallback_from_filename)
+        check("班级行不会被当成学生", test_class_row_not_student)
         check("分值解析（新闻报道封顶 / 逗号笔误）", test_judge_parse_rules)
         check("整表核对与一键修正", test_judge_audit_and_fix)
         check("鉴定栏页：多文件批量核对与修正", test_audit_tab_batch)

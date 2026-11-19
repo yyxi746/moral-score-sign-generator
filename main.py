@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 德育分签字表生成器
 - 不写死文件名 / 工作表 / 表头名 / 列位置 / 人数，通用适配。
@@ -41,7 +41,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 
-HEADER_SCAN_ROWS = 8
+HEADER_SCAN_ROWS = 12
 NAME_KW = ["姓名", "名字", "学生姓名", "name"]
 SCORE_KW = ["总分", "合计", "总成绩", "总得分", "最终得分", "德育总分", "德育分"]
 PRAISE_KW = ["表扬信", "通报表扬", "表扬"]
@@ -51,7 +51,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.13.4"
+APP_VERSION = "v1.13.7"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -115,6 +115,11 @@ def fmt_score(v):
     s = str(v).strip()
     if is_number_text(s):
         f = float(s)
+        return str(int(f)) if f.is_integer() else str(f)
+    # 「100(已满）」「73（75.5）」「77\n（德育分76.5）」这类：取开头的数字，丢掉括号备注
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)", s)
+    if m:
+        f = float(m.group(1))
         return str(int(f)) if f.is_integer() else str(f)
     return s
 
@@ -242,7 +247,24 @@ def extract_class(ws):
                         name = t.split(sep, 1)[1].strip()
                         if name:
                             return name
+    # 没写「班级：」时，表头上方单独一行「农学26-1班」也算班级
+    for r in range(1, scan + 1):
+        for c in range(1, (ws.max_column or 1) + 1):
+            v = ws.cell(r, c).value
+            if not v:
+                continue
+            t = str(v).strip()
+            if CLASS_ROW_RE.match(t) or GRADE_ROW_RE.match(t):
+                return t
     return ""
+
+
+def class_from_filename(path):
+    """从文件名里捞班级名，如「农学26-1班2026-2027学年…」。"""
+    stem = os.path.splitext(os.path.basename(path or ""))[0]
+    m = re.search(r"[\u4e00-\u9fa5A-Za-z]{0,10}\d{2,4}\s*[-－—~]\s*\d{1,2}\s*班",
+                  stem)
+    return m.group(0).strip() if m else ""
 
 
 # ---------- 表扬信：按月份段分组 ----------
@@ -278,7 +300,17 @@ def find_month_group(ws, col):
     return cands[0] if cands else None
 
 
+def normalize_month_text(text):
+    """把月份段里的各种横线统一成半角减号：9—10月 / 9～10月 / 9至10月 → 9-10月。"""
+    s = str(text or "")
+    for ch in ("—", "–", "－", "～", "~", "至", "到"):
+        s = s.replace(ch, "-")
+    s = re.sub(r"\s*-\s*", "-", s)
+    return s.strip()
+
+
 def month_of_group(text):
+    text = normalize_month_text(text)
     m = re.search(r"(\d+\s*[-—~]\s*\d+\s*月)", text)
     if m:
         return m.group(1).replace(" ", "")
@@ -316,7 +348,7 @@ def month_sort_key(m):
 
 
 # ---------- 标题信息 ----------
-def extract_title(ws, sheet_name):
+def extract_title(ws, sheet_name, file_name=""):
     parts_text = []
     max_row = ws.max_row or 1
     for r in range(1, min(HEADER_SCAN_ROWS, max_row) + 1):
@@ -327,16 +359,41 @@ def extract_title(ws, sheet_name):
     blob = " ".join(parts_text)
     ym = re.search(r"(20\d{2}\s*[-—~]\s*20\d{2})", blob)
     tm = re.search(r"第\s*([1-4一二三四])\s*学期", blob)
+    year_raw = ym.group(1) if ym else ""
     term = ("第" + CN_NUM[tm.group(1)] + "学期") if tm else ""
+    # 表头里没写年份/学期时，从文件名兜底（如「农学23-1班2023-2024学年第二学期…」）
+    if not year_raw and file_name:
+        fym = re.search(r"(20\d{2}\s*[-—~]\s*20\d{2})", file_name)
+        if fym:
+            year_raw = fym.group(1)
+    if not term and file_name:
+        ftm = re.search(r"第\s*([1-4一二三四])\s*学期", file_name)
+        if ftm:
+            term = "第" + CN_NUM[ftm.group(1)] + "学期"
+    # 「第—学期」这种把「一」打成破折号的写法，按第一学期处理
+    if not term and re.search(r"第\s*[—–\-]\s*学期", blob):
+        term = "第一学期"
     sheet_part = sheet_name or ""
     if "XX" in sheet_part:
         sheet_part = ""
-    head = " ".join(p for p in [sheet_part,
-                                ym.group(1) if ym else "", term] if p)
+    # 「Sheet1」「Sheet1 (2)」这类默认表名不要写进标题
+    if re.match(r"^sheet\s*\d+\s*(\(\d+\))?$", sheet_part.strip(), re.I):
+        sheet_part = ""
+    # 学年写成「2026-2027学年」
+    year_part = ""
+    if year_raw:
+        year_part = re.sub(r"\s*[-—~]\s*", "-", year_raw) + "学年"
+    head = "".join(p for p in [sheet_part, year_part, term] if p)
     return head + "德育分确认签字表"
 
 
 # ---------- 数据行 ----------
+# 「农学26-1班」「26级农学1班」这类班级行不是学生
+CLASS_ROW_RE = re.compile(
+    r"^[\u4e00-\u9fa5A-Za-z]{0,10}\d{2,4}\s*[-－—~]\s*\d{1,2}\s*班$")
+GRADE_ROW_RE = re.compile(r"^\d{2,4}\s*级.*班$")
+
+
 def is_valid_name(text):
     if not text:
         return False
@@ -345,13 +402,19 @@ def is_valid_name(text):
         return False
     if any(k in text for k in ROW_BLACK):
         return False
+    # 班级行（如「农学26-1班」）不算学生
+    if CLASS_ROW_RE.match(text) or GRADE_ROW_RE.match(text):
+        return False
+    # 带加减号的（如「基础分+70」）是说明文字，不是姓名
+    if "+" in text or "＋" in text:
+        return False
     return True
 
 
 def count_praise_cell(v):
-    if v is None:
-        return 0
-    return sum(1 for line in str(v).split("\n") if line.strip())
+    """表扬信封数：和鉴定栏核对页用同一套拆分规则。
+    同一格里用一串空格隔开、没有换行的多条也各算一封。"""
+    return judge_audit.praise_count(v)
 
 
 def extract_students(ws, name_col, score_col, praise_cols):
@@ -360,8 +423,16 @@ def extract_students(ws, name_col, score_col, praise_cols):
     max_col = ws.max_column or 1
     if not name_col or name_col > max_col:
         return students
-    for r in range(1, max_row + 1):
+    start_row = 1
+    for r in range(1, min(HEADER_SCAN_ROWS, max_row) + 1):
+        v = ws.cell(r, name_col).value
+        if v and match_any(str(v), NAME_KW):
+            start_row = r + 1
+            break
+    for r in range(start_row, max_row + 1):
         nv = ws.cell(r, name_col).value
+        if isinstance(nv, (datetime.datetime, datetime.date)):  # 日期单元格不是姓名
+            continue
         name = "" if nv is None else str(nv).strip()
         if not is_valid_name(name):
             continue
@@ -370,7 +441,8 @@ def extract_students(ws, name_col, score_col, praise_cols):
         for pc in praise_cols:
             if pc and pc <= max_col:
                 praise += count_praise_cell(ws.cell(r, pc).value)
-        students.append({"name": name, "score": score, "praise": praise})
+        students.append({"name": name, "score": score, "praise": praise,
+                         "row": r})
     return students
 
 
@@ -472,6 +544,21 @@ def replace_paragraph(p, text, size=18, bold=True):
         r._element.getparent().remove(r._element)
     run = p.add_run(text)
     set_run_font(run, size=size, bold=bold)
+    compact_paragraph(p)
+
+
+def compact_paragraph(p):
+    """关掉「中文与西文/数字自动加间距」，避免标题里凭空多出空隙。"""
+    try:
+        pPr = p._p.get_or_add_pPr()
+        for tag in ("w:autoSpaceDE", "w:autoSpaceDN"):
+            el = pPr.find(qn(tag))
+            if el is None:
+                el = OxmlElement(tag)
+                pPr.append(el)
+            el.set(qn("w:val"), "0")
+    except Exception as ex:
+        quiet_log("关闭中英文自动间距", ex)
 
 
 def set_class_on_paragraph(p, class_name):
@@ -594,6 +681,32 @@ def collect_excels(folder):
     return sorted(out)
 
 
+def pick_data_sheet(wb):
+    """挑出真正装数据的工作表：跳过图表页，优先有「姓名 + 德育分」列的那张。"""
+    for name in wb.sheetnames:
+        try:
+            ws = wb[name]
+        except Exception:
+            continue
+        if not hasattr(ws, "max_row"):      # 图表页没有单元格
+            continue
+        try:
+            headers = scan_headers(ws)
+            name_col, score_col, praise_cols = detect_columns(headers)
+        except Exception:
+            continue
+        if name_col and score_col:
+            return name, ws, name_col, score_col, praise_cols
+    # 没有完全匹配的表，退回第一张普通工作表
+    for name in wb.sheetnames:
+        ws = wb[name]
+        if hasattr(ws, "max_row"):
+            headers = scan_headers(ws)
+            name_col, score_col, praise_cols = detect_columns(headers)
+            return name, ws, name_col, score_col, praise_cols
+    raise ValueError("工作簿中没有可用的工作表。")
+
+
 def analyze_excel_auto(path, selected_months=None):
     """对单个文件自动识别（第一个工作表、全部月份组）。
     selected_months：只统计这些月份段（集合）；None = 全部月份段。
@@ -602,10 +715,7 @@ def analyze_excel_auto(path, selected_months=None):
     try:
         if not wb.sheetnames:
             raise ValueError("工作簿中没有工作表。")
-        sheet = wb.sheetnames[0]
-        ws = wb[sheet]
-        headers = scan_headers(ws)
-        name_col, score_col, praise_cols = detect_columns(headers)
+        sheet, ws, name_col, score_col, praise_cols = pick_data_sheet(wb)
         if not name_col:
             raise ValueError("未识别到姓名列。")
         if not score_col:
@@ -623,8 +733,8 @@ def analyze_excel_auto(path, selected_months=None):
         if not students:
             raise ValueError("未识别到学生数据。")
         return {"sheet": sheet,
-                "title": extract_title(ws, sheet),
-                "class": extract_class(ws),
+                "title": extract_title(ws, sheet, os.path.basename(path)),
+                "class": extract_class(ws) or class_from_filename(path),
                 "students": students,
                 "month_groups": month_groups}
     finally:
@@ -648,6 +758,9 @@ def process_one_excel(path, template_path_, output_dir, selected_months=None,
     if overrides:
         title = overrides.get("title", title)
         cls = overrides.get("class", cls)
+        drop = set(overrides.get("drop_rows") or [])
+        if drop:
+            students = [s for s in students if s.get("row") not in drop]
     fill_word(template_path_, out, students, title, cls)
     return out, len(students)
 
@@ -1936,56 +2049,95 @@ class App(TkinterDnD.Tk):
         self._build_extract_tab(extract)
         self._build_sentence_tab(sentence)
 
+        # ---- 上半表单 / 下半预览：中间的分隔条可上下拖动 ----
+        shell = ttk.Frame(root)
+        shell.grid(row=0, column=0, sticky="nsew")
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+
+        paned = ttk.PanedWindow(shell, orient="vertical")
+        paned.pack(fill="both", expand=True)
+
+        # 上半部分套一层画布：窗口矮时可以滚动，不会把下面的预览挤没
+        form_holder = ttk.Frame(paned)
+        form_canvas = tk.Canvas(form_holder, highlightthickness=0, bg=CARD_BG)
+        form_vsb = ttk.Scrollbar(form_holder, orient="vertical",
+                                 command=form_canvas.yview)
+        form_canvas.configure(yscrollcommand=form_vsb.set)
+        form_vsb.pack(side="right", fill="y")
+        form_canvas.pack(side="left", fill="both", expand=True)
+        form = ttk.Frame(form_canvas)
+        form_item = form_canvas.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda e: form_canvas.configure(
+            scrollregion=form_canvas.bbox("all")))
+        form_canvas.bind("<Configure>", lambda e: form_canvas.itemconfigure(
+            form_item, width=e.width))
+        form_canvas.bind("<MouseWheel>", lambda e: form_canvas.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+        self._form_canvas = form_canvas
+        self._form_frame = form
+
+        prev_host = ttk.Frame(paned)
+        paned.add(form_holder, weight=0)
+        paned.add(prev_host, weight=1)
+        self._single_paned = paned
+        self._single_form = form
+        self._dropped_rows = set()
+        self._preview_rows = {}
+        self._sash_ready = False
+        form.columnconfigure(1, weight=1)
+        paned.bind("<Configure>", self._init_single_sash)
+
         r = 0
-        ttk.Label(root, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.excel_path).grid(
+        ttk.Label(form, text="Excel 数据源：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.excel_path).grid(
             row=r, column=1, columnspan=2, sticky="we", **pad)
-        ttk.Button(root, text="浏览…", command=self.browse_excel).grid(row=r, column=3, **pad)
-        ttk.Button(root, text="清除", command=self.clear_excel).grid(row=r, column=4, **pad)
+        ttk.Button(form, text="浏览…", command=self.browse_excel).grid(row=r, column=3, **pad)
+        ttk.Button(form, text="清除", command=self.clear_excel).grid(row=r, column=4, **pad)
 
         r += 1
-        ttk.Label(root, text="工作表：").grid(row=r, column=0, sticky="w", **pad)
-        self.sheet_combo = ttk.Combobox(root, textvariable=self.sheet_name, state="readonly")
+        ttk.Label(form, text="工作表：").grid(row=r, column=0, sticky="w", **pad)
+        self.sheet_combo = ttk.Combobox(form, textvariable=self.sheet_name, state="readonly")
         self.sheet_combo.grid(row=r, column=1, columnspan=3, sticky="we", **pad)
         self.sheet_combo.bind("<<ComboboxSelected>>", lambda e: self.analyze())
 
         r += 1
-        ttk.Label(root, text="Word 模板：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.template_path).grid(
+        ttk.Label(form, text="Word 模板：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.template_path).grid(
             row=r, column=1, columnspan=3, sticky="we", **pad)
-        ttk.Button(root, text="浏览…", command=self.browse_template).grid(row=r, column=4, **pad)
+        ttk.Button(form, text="浏览…", command=self.browse_template).grid(row=r, column=4, **pad)
 
         r += 1
-        ttk.Label(root, text="Word 标题：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.title_text).grid(
-            row=r, column=1, columnspan=3, sticky="we", **pad)
-
-        r += 1
-        ttk.Label(root, text="班级：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.class_name).grid(
+        ttk.Label(form, text="Word 标题：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.title_text).grid(
             row=r, column=1, columnspan=3, sticky="we", **pad)
 
         r += 1
-        ttk.Label(root, text="输出目录：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.output_dir).grid(
+        ttk.Label(form, text="班级：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.class_name).grid(
+            row=r, column=1, columnspan=3, sticky="we", **pad)
+
+        r += 1
+        ttk.Label(form, text="输出目录：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.output_dir).grid(
             row=r, column=1, columnspan=2, sticky="we", **pad)
-        ttk.Button(root, text="浏览…", command=self.browse_output_dir).grid(
+        ttk.Button(form, text="浏览…", command=self.browse_output_dir).grid(
             row=r, column=3, **pad)
-        ttk.Button(root, text="清除", command=self.clear_output_dir).grid(
+        ttk.Button(form, text="清除", command=self.clear_output_dir).grid(
             row=r, column=4, **pad)
 
         r += 1
-        ttk.Label(root, text="（必选：点「浏览…」指定输出目录，不会再默认放到数据源目录）",
+        ttk.Label(form, text="（必选：点「浏览…」指定输出目录，不会再默认放到数据源目录）",
                   foreground="gray").grid(row=r, column=1, columnspan=3, sticky="w", padx=8)
 
         r += 1
-        ttk.Label(root, text="输出文件：").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(root, textvariable=self.output_path).grid(
+        ttk.Label(form, text="输出文件：").grid(row=r, column=0, sticky="w", **pad)
+        ttk.Entry(form, textvariable=self.output_path).grid(
             row=r, column=1, columnspan=3, sticky="we", **pad)
-        ttk.Button(root, text="浏览…", command=self.browse_output).grid(row=r, column=4, **pad)
+        ttk.Button(form, text="浏览…", command=self.browse_output).grid(row=r, column=4, **pad)
 
         r += 1
-        map_frame = ttk.LabelFrame(root, text="列映射（已自动识别，可手动调整）")
+        map_frame = ttk.LabelFrame(form, text="列映射（已自动识别，可手动调整）")
         map_frame.grid(row=r, column=0, columnspan=5, sticky="we", padx=8, pady=6)
         ttk.Label(map_frame, text="姓名列：").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.name_combo = ttk.Combobox(map_frame, textvariable=self.name_label,
@@ -2004,13 +2156,27 @@ class App(TkinterDnD.Tk):
         self.praise_frame = ttk.Frame(map_frame)
         self.praise_frame.grid(row=1, column=1, columnspan=3, sticky="w", padx=6)
 
-        r += 1
-        prev_frame = ttk.LabelFrame(root, text="结果预览（生成前可核对，含全部学生）")
-        prev_frame.grid(row=r, column=0, columnspan=5, sticky="nsew", padx=8, pady=6)
+        # 底部按钮栏先占住下方空间，预览框再填满剩下的区域
+        bottom_bar = ttk.Frame(prev_host)
+        bottom_bar.pack(side="bottom", fill="x", pady=(4, 4))
+        self.count_label = ttk.Label(bottom_bar, text="共识别到 0 人")
+        self.count_label.pack(side="left", padx=10)
+        self.gen_btn = ttk.Button(bottom_bar, text="生成签字表",
+                                  command=self.generate)
+        self.gen_btn.pack(side="right", padx=10)
+
+        prev_frame = ttk.LabelFrame(prev_host, text="结果预览（生成前可核对，含全部学生）")
+        prev_frame.pack(fill="both", expand=True, padx=4, pady=(4, 0))
         prev_bar = ttk.Frame(prev_frame)
         prev_bar.pack(fill="x", padx=6, pady=(6, 0))
         ttk.Button(prev_bar, text="复制名单",
                    command=self.copy_preview_names).pack(side="left")
+        ttk.Button(prev_bar, text="删除选中",
+                   command=self.delete_preview_rows).pack(side="left", padx=6)
+        ttk.Button(prev_bar, text="恢复全部",
+                   command=self.restore_preview_rows).pack(side="left")
+        ttk.Label(prev_bar, text="（选中行按 Delete 也能删；生成时跳过这些人）",
+                  foreground="gray").pack(side="left", padx=10)
         self.tree = ttk.Treeview(prev_frame, columns=("name", "score", "praise"),
                                  show="headings", height=10)
         self.tree.heading("name", text="姓名")
@@ -2020,21 +2186,13 @@ class App(TkinterDnD.Tk):
         self.tree.column("score", width=170, anchor="center")
         self.tree.column("praise", width=170, anchor="center")
         self.tree.tag_configure("warnrow", background="#fff3cd")
+        self.tree.bind("<Delete>", lambda e: self.delete_preview_rows())
         self.tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(prev_frame, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y", pady=6)
         self.tree.configure(yscrollcommand=sb.set)
 
-        r += 1
-        self.count_label = ttk.Label(root, text="共识别到 0 人")
-        self.count_label.grid(row=r, column=0, columnspan=5, sticky="w", padx=10)
-
-        r += 1
-        self.gen_btn = ttk.Button(root, text="生成签字表", command=self.generate)
-        self.gen_btn.grid(row=r, column=0, columnspan=5, pady=10)
-
-        root.columnconfigure(1, weight=1)
-        root.rowconfigure(9, weight=1)
+        self._bind_form_wheel(form)
 
         # 文件拖放支持
         register_drop_recursive(self._pages["single"], self._on_drop_single)
@@ -2046,6 +2204,47 @@ class App(TkinterDnD.Tk):
         self._active_tab = "single"
         self._pages["single"].tkraise()
         self._update_nav_style("single")
+
+    def _bind_form_wheel(self, widget):
+        """表单在画布里：鼠标停在哪都能用滚轮上下滚。"""
+        def on_wheel(event):
+            canvas = getattr(self, "_form_canvas", None)
+            if canvas is None:
+                return
+            bbox = canvas.bbox("all")
+            if not bbox or bbox[3] <= canvas.winfo_height():
+                return
+            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        def walk(w):
+            try:
+                if not isinstance(w, ttk.Combobox):
+                    w.bind("<MouseWheel>", on_wheel, add="+")
+            except Exception:
+                pass
+            for child in w.winfo_children():
+                walk(child)
+
+        walk(widget)
+
+    def _init_single_sash(self, event=None):
+        """首次显示时把分隔条放在合适位置：预览占下半部分约一半。"""
+        if getattr(self, "_sash_ready", False):
+            return
+        paned = getattr(self, "_single_paned", None)
+        if paned is None:
+            return
+        total = paned.winfo_height()
+        if total < 200:
+            return
+        self._sash_ready = True
+        # 表单可滚动，默认给预览留出约一半高度
+        pos = max(220, int(total * 0.50))
+        pos = min(pos, max(220, total - 200))
+        try:
+            paned.sashpos(0, pos)
+        except Exception as ex:
+            quiet_log("设置预览分隔条位置", ex)
 
     # ---------- 文件选择 ----------
     def browse_excel(self):
@@ -2148,6 +2347,7 @@ class App(TkinterDnD.Tk):
         ws = self._current_ws()
         if ws is None:
             return
+        self._dropped_rows = set()   # 换文件/换工作表时恢复全部学生
         self.headers = scan_headers(ws)
         self.col_options = column_labels(self.headers)
         self.label_to_col = {label: c for label, c in self.col_options}
@@ -2172,7 +2372,9 @@ class App(TkinterDnD.Tk):
                             command=self.refresh_preview).grid(
                 row=i // 3, column=i % 3, sticky="w", padx=6, pady=3)
 
-        self.title_text.set(extract_title(ws, self.sheet_name.get()))
+        self.title_text.set(extract_title(
+            ws, self.sheet_name.get(),
+            os.path.basename(self.excel_path.get())))
         cls = extract_class(ws)
         if cls:
             self.class_name.set(cls)
@@ -2199,7 +2401,36 @@ class App(TkinterDnD.Tk):
         if ws is None:
             return []
         name_col, score_col, praise_cols = self._selected_cols()
-        return extract_students(ws, name_col, score_col, praise_cols)
+        students = extract_students(ws, name_col, score_col, praise_cols)
+        dropped = getattr(self, "_dropped_rows", set())
+        if dropped:
+            students = [s for s in students if s.get("row") not in dropped]
+        return students
+
+    def delete_preview_rows(self):
+        """从预览里删掉选中的学生（生成时会跳过这些人）。"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在预览里选中要删除的行。")
+            return
+        dropped = getattr(self, "_dropped_rows", None)
+        if dropped is None:
+            dropped = set()
+            self._dropped_rows = dropped
+        n = 0
+        for item in sel:
+            row = self._preview_rows.get(item)
+            if row is not None:
+                dropped.add(row)
+                n += 1
+        self.refresh_preview()
+        self.status.config(
+            text=f"已从签字表移除 {n} 人（重新选择文件可恢复全部）")
+
+    def restore_preview_rows(self):
+        self._dropped_rows = set()
+        self.refresh_preview()
+        self.status.config(text="已恢复全部学生")
 
     def copy_preview_names(self):
         """把预览区全部学生姓名复制到剪贴板。"""
@@ -2220,11 +2451,13 @@ class App(TkinterDnD.Tk):
             problems = validate_students(students)
             bad = {p[1] for p in problems
                    if p[0] in ("empty", "neg", "badtext")}
+            self._preview_rows = {}
             for i, st in enumerate(students):
-                self.tree.insert(
+                item = self.tree.insert(
                     "", "end",
                     values=(st["name"], st["score"], st["praise"]),
                     tags=("warnrow",) if i in bad else ())
+                self._preview_rows[item] = st.get("row")
             if problems and problems[0][0] == "zero":
                 self.count_label.config(text="共识别到 0 人")
             elif problems:
@@ -2434,33 +2667,35 @@ class App(TkinterDnD.Tk):
         top = tk.Toplevel(self)
         top.title("文件详情")
         top.transient(self)
-        top.resizable(False, True)
-        frm = ttk.Frame(top, padding=14)
+        top.resizable(True, True)
+        frm = ttk.Frame(top, padding=16)
         frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        frm.rowconfigure(3, weight=1)
         ttk.Label(frm, text=os.path.basename(path), foreground="gray").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        ttk.Label(frm, text="Word 标题：").grid(row=1, column=0, sticky="w", pady=4)
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frm, text="Word 标题：").grid(row=1, column=0, sticky="w", pady=5)
         title_var = tk.StringVar(value=ov.get("title", info["title"]))
-        ttk.Entry(frm, textvariable=title_var, width=48).grid(
-            row=1, column=1, sticky="we", pady=4)
-        ttk.Label(frm, text="班级：").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=title_var, width=60).grid(
+            row=1, column=1, sticky="we", pady=5)
+        ttk.Label(frm, text="班级：").grid(row=2, column=0, sticky="w", pady=5)
         class_var = tk.StringVar(value=ov.get("class", info["class"]))
-        ttk.Entry(frm, textvariable=class_var, width=48).grid(
-            row=2, column=1, sticky="we", pady=4)
+        ttk.Entry(frm, textvariable=class_var, width=60).grid(
+            row=2, column=1, sticky="we", pady=5)
 
-        students = info["students"]
+        students = list(info["students"])
         detail = ttk.LabelFrame(
             frm, text=f"学生明细（{len(students)}人，黄色行=分数异常）")
         detail.grid(row=3, column=0, columnspan=2, sticky="nsew",
                     pady=(8, 0))
         dt = ttk.Treeview(detail, columns=("name", "score", "praise"),
-                          show="headings", height=9)
+                          show="headings", height=12)
         dt.heading("name", text="姓名")
         dt.heading("score", text="德育分")
         dt.heading("praise", text="表扬信(条)")
-        dt.column("name", width=240, anchor="w")
-        dt.column("score", width=100, anchor="center")
-        dt.column("praise", width=100, anchor="center")
+        dt.column("name", width=260, anchor="w")
+        dt.column("score", width=110, anchor="center")
+        dt.column("praise", width=110, anchor="center")
         dt.tag_configure("warnrow", background="#fff3cd")
         bad_rows = {p[1] for p in info.get("problems", [])
                     if p[0] in ("empty", "neg", "badtext")}
@@ -2472,6 +2707,39 @@ class App(TkinterDnD.Tk):
         dsb = ttk.Scrollbar(detail, orient="vertical", command=dt.yview)
         dsb.pack(side="right", fill="y", pady=6)
         dt.configure(yscrollcommand=dsb.set)
+
+        # 允许在生成前删掉个别学生（如转专业、离校）
+        dropped = set(ov.get("drop_rows") or [])
+        kept = [s for s in students if s.get("row") not in dropped]
+
+        def refill():
+            for i in dt.get_children():
+                dt.delete(i)
+            bad = {p[1] for p in validate_students(kept)
+                   if p[0] in ("empty", "neg", "badtext")}
+            for i, s in enumerate(kept):
+                dt.insert("", "end", values=(s["name"], s["score"], s["praise"]),
+                          tags=("warnrow",) if i in bad else ())
+            detail.config(text=f"学生明细（{len(kept)}人，黄色行=分数异常）")
+
+        def drop_selected(event=None):
+            sel = dt.selection()
+            if not sel:
+                return
+            for idx in sorted((dt.index(i) for i in sel), reverse=True):
+                if 0 <= idx < len(kept):
+                    dropped.add(kept[idx].get("row"))
+                    del kept[idx]
+            refill()
+
+        btn_row = ttk.Frame(frm)
+        btn_row.grid(row=4, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        ttk.Button(btn_row, text="删除选中行",
+                   command=drop_selected).pack(side="left")
+        ttk.Label(btn_row, text="选中行按 Delete 也能删，保存后生成会跳过这些人",
+                  foreground="gray").pack(side="left", padx=10)
+        dt.bind("<Delete>", drop_selected)
+        refill()
 
         def status_text(suffix):
             probs = info.get("problems", [])
@@ -2486,13 +2754,19 @@ class App(TkinterDnD.Tk):
             if not t:
                 messagebox.showwarning("提示", "标题不能为空。", parent=top)
                 return
-            self.batch_overrides[item] = {"title": t,
-                                         "class": class_var.get().strip()}
+            self.batch_overrides[item] = {
+                "title": t,
+                "class": class_var.get().strip(),
+                "drop_rows": sorted(r for r in dropped if r is not None),
+            }
             cur = self.batch_tree.item(item, "values")
             tags = self.batch_tree.item(item, "tags")
+            note = "已修正"
+            if dropped:
+                note += f"、已删{len(dropped)}人"
             self.batch_tree.item(
                 item,
-                values=(cur[0], cur[1], cur[2], status_text("已修正")),
+                values=(cur[0], cur[1], len(kept), status_text(note)),
                 tags=tags)
             top.destroy()
 
@@ -2512,13 +2786,18 @@ class App(TkinterDnD.Tk):
             top.destroy()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(btns, text="保存修正", command=save).pack(side="left", padx=6)
-        ttk.Button(btns, text="恢复自动识别", command=reset).pack(side="left", padx=6)
-        ttk.Button(btns, text="取消", command=top.destroy).pack(side="left", padx=6)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="保存修正", style="Accent.TButton",
+                   command=save).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="恢复自动识别",
+                   command=reset).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="取消",
+                   command=top.destroy).pack(side="right")
         top.grab_set()
+        top.geometry("820x640")
         top.update_idletasks()
-        top.geometry(f"+{self.winfo_rootx() + 60}+{self.winfo_rooty() + 30}")
+        _center_top_on(self, top)
+        top.lift()
 
     def batch_remove(self):
         for sel in self.batch_tree.selection():

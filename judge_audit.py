@@ -243,8 +243,17 @@ def _num(v):
         return None
 
 
+# 班级行（如「农学26-1班」）不是学生
+CLASS_ROW_RE = re.compile(
+    r"^[\u4e00-\u9fa5A-Za-z]{0,10}\d{2,4}\s*[-－—~]\s*\d{1,2}\s*班$")
+GRADE_ROW_RE = re.compile(r"^\d{2,4}\s*级.*班$")
+
+
 def _is_summary_row(name):
-    return any(k in str(name) for k in ("合计", "总计", "小计", "说明", "备注", "签字"))
+    s = str(name).strip()
+    if any(k in s for k in ("合计", "总计", "小计", "说明", "备注", "签字")):
+        return True
+    return bool(CLASS_ROW_RE.match(s) or GRADE_ROW_RE.match(s))
 
 
 def audit_sheet(ws, first_row=5):
