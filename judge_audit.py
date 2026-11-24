@@ -61,12 +61,18 @@ def split_records(value):
     return out
 
 
+def is_news_item(line):
+    """这条算不算「新闻报道」：现在要求同时出现「新闻」和「报道」。"""
+    return "新闻报道" in line or ("新闻" in line and "报道" in line)
+
+
+
 def activity_score(value):
     """活动分：普通条目直接累加；含「新闻报道」的条目合计封顶 5 分。"""
     news, other = 0.0, 0.0
     for line in split_records(value):
         pts = parse_points(line)
-        if "新闻报道" in line or "新闻" in line and "报道" in line:
+        if is_news_item(line):
             news += pts
         else:
             other += pts

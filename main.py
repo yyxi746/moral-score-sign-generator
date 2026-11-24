@@ -51,7 +51,7 @@ ROW_BLACK = ["合计", "总计", "小计", "说明", "备注", "签字", "序号
 TEMPLATE_NAME = "签字表模板.docx"
 CONFIG_NAME = "config.json"
 APP_DIR_NAME = "德育分签字表生成器"
-APP_VERSION = "v1.13.7"
+APP_VERSION = "v1.13.8"
 GITHUB_URL = "https://github.com/yyxi746/moral-score-sign-generator"
 CN_NUM = {"1": "一", "2": "二", "3": "三", "4": "四",
           "一": "一", "二": "二", "三": "三", "四": "四"}
@@ -3269,10 +3269,23 @@ class App(TkinterDnD.Tk):
                    command=self.audit_remove).pack(side="left", padx=4)
         ttk.Button(bar, text="清空列表",
                    command=self.audit_clear).pack(side="left", padx=4)
+        ttk.Button(bar, text="检查全部", style="Accent.TButton",
+                   command=self.audit_run_all).pack(side="right", padx=4)
+
+        # 上半（列表 + 输出目录 + 按钮）与下半（学生明细）之间可拖动
+        paned = ttk.PanedWindow(outer, orient="vertical")
+        paned.pack(fill="both", expand=True, pady=(6, 0))
+        pane_top = ttk.Frame(paned)
+        pane_bot = ttk.Frame(paned)
+        paned.add(pane_top, weight=1)
+        paned.add(pane_bot, weight=2)
+        self._audit_paned = paned
+        self._audit_sash_ready = False
+        paned.bind("<Configure>", self._init_audit_sash)
 
         list_frame = ttk.LabelFrame(
-            outer, text="要核对的统计表（可直接把 Excel 文件或文件夹拖入）")
-        list_frame.pack(fill="both", expand=True, pady=6)
+            pane_top, text="要核对的统计表（可直接把 Excel 文件或文件夹拖入）")
+        list_frame.pack(fill="both", expand=True, pady=(0, 4))
         self.audit_placeholder = ttk.Label(
             list_frame, text="把 Excel 拖到这里，或点上方「添加文件」",
             foreground="gray")
@@ -3306,12 +3319,12 @@ class App(TkinterDnD.Tk):
 
         # 结论条：直接写清有几个文件要改，点一下跳到下一处
         self.audit_summary = tk.Label(
-            outer, text="", bg=PAGE_BG, fg="#b00020",
+            pane_top, text="", bg=PAGE_BG, fg="#b00020",
             font=(UI_FONT, 9, "bold"), anchor="w", cursor="hand2")
         self.audit_summary.pack(fill="x", padx=6, pady=(0, 2))
         self.audit_summary.bind("<Button-1>", lambda e: self._audit_jump_next())
 
-        out_frame = ttk.Frame(outer)
+        out_frame = ttk.Frame(pane_top)
         out_frame.pack(fill="x", pady=(2, 0))
         ttk.Label(out_frame, text="输出目录：").grid(
             row=0, column=0, sticky="w", padx=4, pady=2)
@@ -3327,24 +3340,30 @@ class App(TkinterDnD.Tk):
                                           sticky="w", padx=4)
         out_frame.columnconfigure(1, weight=1)
 
-        btns = ttk.Frame(outer)
-        btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns, text="检查全部", style="Accent.TButton",
-                   command=self.audit_run_all).pack(side="left", padx=4)
+        btns = ttk.Frame(pane_top)
+        btns.pack(fill="x", pady=(6, 4))
+
         ttk.Button(btns, text="导出核对表",
                    command=self.audit_export).pack(side="left", padx=4)
         ttk.Button(btns, text="一键自动修正",
                    command=self.audit_fix).pack(side="left", padx=4)
 
-        detail_frame = ttk.LabelFrame(outer, text="学生明细（选中上方文件后显示）")
-        detail_frame.pack(fill="both", expand=True, pady=6)
+        ttk.Label(
+            pane_bot,
+            text="双击「第一段/第二段/附加分应得」可直接改数，改完回车生效并参与一键修正；"
+                 "总分勾稽应 = C+F−H+K−M+O，「不一致」多为表内公式引错行或被手工改过，程序只提示不改",
+            foreground="#6b7d72", justify="left").pack(side="bottom", fill="x",
+                                                      pady=(2, 0), padx=4)
+        detail_frame = ttk.LabelFrame(
+            pane_bot, text="学生明细（选中上方文件后显示，可拖动分隔条调整高度）")
+        detail_frame.pack(fill="both", expand=True, pady=(4, 0))
         dcols = ("name", "f", "fe", "k", "ke", "o", "oe", "total", "status")
         dheads = {"name": "姓名", "f": "第一段现值", "fe": "第一段应得",
                   "k": "第二段现值", "ke": "第二段应得",
                   "o": "附加分现值", "oe": "附加分应得",
                   "total": "总分勾稽", "status": "结果"}
-        dwidth = {"name": 76, "f": 68, "fe": 68, "k": 68, "ke": 68,
-                  "o": 68, "oe": 68, "total": 62, "status": 200}
+        dwidth = {"name": 72, "f": 64, "fe": 64, "k": 64, "ke": 64,
+                  "o": 64, "oe": 64, "total": 100, "status": 220}
         self.audit_detail = ttk.Treeview(detail_frame, columns=dcols,
                                          show="headings", height=8)
         for c in dcols:
@@ -3354,6 +3373,7 @@ class App(TkinterDnD.Tk):
         self.audit_detail.tag_configure(
             "bad", background="#ffe0e0", foreground="#b00020",
             font=(UI_FONT, 9, "bold"))
+
         dsb = ttk.Scrollbar(detail_frame, orient="vertical",
                             command=self.audit_detail.yview)
         self.audit_detail.configure(yscrollcommand=dsb.set)
@@ -3361,6 +3381,7 @@ class App(TkinterDnD.Tk):
                                padx=(6, 0), pady=6)
         dsb.pack(side="right", fill="y", pady=6)
         self.audit_detail.bind("<Configure>", self._audit_fit_columns, add="+")
+        self.audit_detail.bind("<Double-1>", self._audit_begin_edit)
 
         register_drop_recursive(parent, self._on_drop_audit)
 
@@ -3418,6 +3439,22 @@ class App(TkinterDnD.Tk):
             self.audit_summary.config(text="")
         self.status.config(text="列表已清空")
 
+    def _init_audit_sash(self, event=None):
+        """首次显示时把分隔条放中间偏下，列表和明细都能看到几行。"""
+        if getattr(self, "_audit_sash_ready", False):
+            return
+        paned = getattr(self, "_audit_paned", None)
+        if paned is None:
+            return
+        total = paned.winfo_height()
+        if total < 200:
+            return
+        self._audit_sash_ready = True
+        try:
+            paned.sashpos(0, max(180, int(total * 0.42)))
+        except Exception as ex:
+            quiet_log("设置核对页分隔条位置", ex)
+
     def _audit_fit_columns(self, event=None):
         """按控件实际宽度按比例分配列宽，保证最后一列不被裁掉。"""
         self._fit_tree_columns(
@@ -3425,9 +3462,9 @@ class App(TkinterDnD.Tk):
             (("file", 0.40), ("count", 0.12), ("diff", 0.12), ("status", 0.36)))
         self._fit_tree_columns(
             self.audit_detail,
-            (("name", 0.11), ("f", 0.105), ("fe", 0.105), ("k", 0.105),
-             ("ke", 0.105), ("o", 0.105), ("oe", 0.105), ("total", 0.09),
-             ("status", 0.165)))
+            (("name", 0.10), ("f", 0.09), ("fe", 0.09), ("k", 0.09),
+             ("ke", 0.09), ("o", 0.09), ("oe", 0.09), ("total", 0.12),
+             ("status", 0.24)))
 
     def _fit_tree_columns(self, tree, weights):
         width = tree.winfo_width()
@@ -3488,7 +3525,9 @@ class App(TkinterDnD.Tk):
                 issues = judge_audit.collect_issues(rows)
                 self.audit_info[item] = {"path": path, "cols": cols,
                                          "rows": rows, "issues": issues,
-                                         "problems": problems}
+                                         "problems": problems,
+                                         "rows_auto": [dict(r["expect"]) for r in rows],
+                                         "overrides": {}}
                 total_issues += len(issues)
                 status = f"⚠ 需修正 {len(issues)} 处" if issues else "✓ 正确"
                 if problems:
@@ -3516,6 +3555,11 @@ class App(TkinterDnD.Tk):
         if bad_items:
             self.audit_tree.see(bad_items[0])
             self._audit_show_detail(item=bad_items[0])
+        else:
+            # 全部正确时也把第一个文件的学生列出来，方便扫一眼
+            all_items = self.audit_tree.get_children()
+            if all_items:
+                self._audit_show_detail(item=all_items[0])
 
     def _audit_bad_items(self):
         """按列表顺序返回「有差异」和「读取失败」的行。"""
@@ -3559,6 +3603,88 @@ class App(TkinterDnD.Tk):
         self.audit_tree.see(target)
         self._audit_show_detail(item=target)
 
+    def _audit_apply_overrides(self, item):
+        """把手动改过的应得套回去，重算差异并刷新该文件那一行。"""
+        info = self.audit_info.get(item)
+        if not info:
+            return
+        auto = info.get("rows_auto") or []
+        ov = info.get("overrides") or {}
+        for i, r in enumerate(info["rows"]):
+            if i < len(auto):
+                r["expect"] = dict(auto[i])
+            for (row_no, col), val in ov.items():
+                if row_no == r["row"]:
+                    r["expect"][col] = val
+        info["issues"] = judge_audit.collect_issues(info["rows"])
+        name = os.path.basename(info["path"])
+        status = (f"⚠ 需修正 {len(info['issues'])} 处"
+                  if info["issues"] else "✓ 正确")
+        if ov:
+            status += f"（手工改 {len(ov)} 处）"
+        self.audit_tree.item(
+            item, values=(name, len(info["rows"]), len(info["issues"]), status),
+            tags=("bad",) if info["issues"] else ())
+        self._audit_refresh_summary()
+
+    def _audit_begin_edit(self, event):
+        """双击「应得」列直接改数：改完按回车生效，会参与一键修正。"""
+        if self.audit_detail.identify_region(event.x, event.y) != "cell":
+            return
+        item = self.audit_detail.identify_row(event.y)
+        if not item:
+            return
+        col_id = self.audit_detail.identify_column(event.x)   # 例如 '#3'
+        try:
+            col_name = list(self.audit_detail["columns"])[int(col_id[1:]) - 1]
+        except (ValueError, IndexError):
+            return
+        meta = getattr(self, "_detail_meta", {}).get((item, col_name))
+        if not meta:
+            return
+        list_item, row_no, key = meta
+        if key not in ("fe", "ke", "oe"):
+            return          # 只能改应得，现值是 Excel 里的数，不在这改
+        info = self.audit_info.get(list_item)
+        if not info:
+            return
+        col_key = {"fe": "f", "ke": "k", "oe": "o"}[key]
+        judge_cols = self._audit_cols_of(info["cols"])
+        col_no = {"f": judge_cols[0], "k": judge_cols[1],
+                  "o": judge_cols[2]}[col_key]
+        if not col_no:
+            return
+        bbox = self.audit_detail.bbox(item, self.audit_detail.identify_column(event.x))
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        cur = info["rows"][next(i for i, r in enumerate(info["rows"])
+                                if r["row"] == row_no)]["expect"].get(col_no, "")
+        var = tk.StringVar(value=f"{cur:g}" if isinstance(cur, (int, float)) else "")
+        ent = ttk.Entry(self.audit_detail, textvariable=var, justify="center")
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.focus_set()
+        ent.select_range(0, "end")
+
+        def commit(_e=None):
+            text = var.get().strip()
+            try:
+                val = float(text)
+            except ValueError:
+                ent.destroy()
+                if text:
+                    messagebox.showwarning("提示", "请输入数字。", parent=self)
+                return
+            ent.destroy()
+            info.setdefault("overrides", {})[(row_no, col_no)] = round(val, 2)
+            self._audit_apply_overrides(list_item)
+            self._audit_show_detail(item=list_item)
+            self.status.config(text=f"已手动改为 {val:g}，点「一键自动修正」会写进文件")
+
+        ent.bind("<Return>", commit)
+        ent.bind("<FocusOut>", commit)
+        ent.bind("<Escape>", lambda e: ent.destroy())
+
     def _audit_show_detail(self, event=None, item=None):
         if item is None:
             sel = self.audit_tree.selection()
@@ -3568,8 +3694,10 @@ class App(TkinterDnD.Tk):
         info = self.audit_info.get(item)
         for i in self.audit_detail.get_children():
             self.audit_detail.delete(i)
+        self._detail_meta = {}
         if not info:
             return
+        sel_item = item
         f_col, k_col, o_col = self._audit_cols_of(info["cols"])
         bad_rows = {}
         for row, col, cur, exp, _r in info["issues"]:
@@ -3589,15 +3717,18 @@ class App(TkinterDnD.Tk):
                 result = "正确（含未识别附加分）"
             else:
                 result = "正确"
+
             vals = (r["name"],
                     show(r["current"].get(f_col)), show(r["expect"].get(f_col)),
                     show(r["current"].get(k_col)), show(r["expect"].get(k_col)),
                     show(r["current"].get(o_col)), show(r["expect"].get(o_col)),
                     {True: "一致", False: "不一致", None: "—"}[r["total_ok"]],
                     result)
+            row_tags = ("bad",) if r["row"] in bad_rows else ()
             item = self.audit_detail.insert(
-                "", "end", values=vals,
-                tags=("bad",) if r["row"] in bad_rows else ())
+                "", "end", values=vals, tags=row_tags)
+            for ck in ("name", "fe", "ke", "oe"):
+                self._detail_meta[(item, ck)] = (sel_item, r["row"], ck)
             if first_bad is None and r["row"] in bad_rows:
                 first_bad = item
         if first_bad:
